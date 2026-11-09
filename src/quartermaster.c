@@ -552,7 +552,7 @@ static void srv_take(DWORD game, DWORD player, DWORD code, int want) {
 // The client asks every ~2 s (command 7). The server walks everything the player owns (stored, equipped, belt, cursor) and reports each IDENTIFIED unique,
 // set item it has not reported yet; the client thread does the file and the chat. Item data = unit +0x14, confirmed in D2Common:
 // +0x00 quality (5 set, 7 unique), +0x18 item flags (0x10 identified), +0x28 unique/set table index (an unidentified item already has it).
-// The index is checked against the game's runtime table (the row's base item must be the item's class), so a wrong offset can never record a wrong item.
+// The index is checked against the game's runtime table (the row's base item code must equal the item's code), so a wrong offset can never record a wrong item.
 typedef struct { BYTE kind; WORD idx; char who[16]; } gfind_t;               // kind 0 unique, 1 set
 #define GRQ 128
 #define GRMAX 1024
@@ -574,7 +574,7 @@ static int grq_pop(gfind_t *f) {
     return ok;
 }
 static void srv_grail(DWORD player, int rescan) {
-    if (!thunk_ok(0xa46c) || !thunk_ok(0xa60a) || !thunk_ok(0xa5f8)) return;
+    if (!thunk_ok(0xa46c) || !thunk_ok(0xa60a) || !thunk_ok(0xa5f8) || !thunk_ok(0xa490)) return;
     if (!readable((void *)player, 0x70) || *(DWORD *)player != 0) return;
     DWORD inv = *(DWORD *)(player + 0x60);
     if (!inv || !readable((void *)inv, 0x10)) return;
@@ -604,8 +604,9 @@ static void srv_grail(DWORD player, int rescan) {
         {
             int cnt = kind ? scount : ucount; BYTE *tab = kind ? stab : utab; size_t stride = kind ? 0x1b8 : 0x14c;
             if ((int)idx >= cnt || !readable(tab + (size_t)idx * stride, stride)) continue;
-            DWORD base = *(DWORD *)(tab + (size_t)idx * stride + 0x28);
-            if (base != cls) { if (bad++ < 5) logf_("grail: %s index %lu: table base item %lu but the item is class %lu - ignored", kind ? "set" : "unique", (unsigned long)idx, (unsigned long)base, (unsigned long)cls); continue; }
+            DWORD base = *(DWORD *)(tab + (size_t)idx * stride + 0x28);       // the row's base item CODE (4 chars), as the unique maker 6fd00f10 compares it with [item record + 0x80]
+            DWORD rec = ((dg_fn1)(g_dg + 0xa490))(cls), code = rec && readable((void *)rec, 0x84) ? *(DWORD *)(rec + 0x80) : 0;      // thunk 0xa490: item class -> its Items txt record (0x1a8 bytes per row)
+            if (!code || base != code) { if (bad++ < 5) logf_("grail: %s index %lu: table base %lx but the item's code is %lx (class %lu) - ignored", kind ? "set" : "unique", (unsigned long)idx, (unsigned long)base, (unsigned long)code, (unsigned long)cls); continue; }
         }
         gfind_t f; f.kind = (BYTE)kind; f.idx = (WORD)idx; memcpy(f.who, who, 16); f.who[15] = 0;
         if (grq_push(&f)) g_gr_rep[kind][idx] = 1;                                // queue full: try again next time
@@ -1145,13 +1146,13 @@ static void gr_apply(const gfind_t *f, int n, int quiet) {
     if (!gr_init()) return;
     char now[20]; SYSTEMTIME t; GetLocalTime(&t);
     snprintf(now, sizeof now, "%04d-%02d-%02d %02d:%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute);
-    int added = 0, lk[GRQ], li[GRQ];
+    int added = 0;
     for (int i = 0; i < n; i++) {
         int k = f[i].kind, idx = f[i].idx;
         if (k > 1 || idx >= gr_n(k) || gr_arr(k)[idx].off || g_gs[k][idx].when[0]) continue;
         snprintf(g_gs[k][idx].when, sizeof g_gs[k][idx].when, "%s", now);
         snprintf(g_gs[k][idx].who, sizeof g_gs[k][idx].who, "%s", f[i].who);
-        lk[added] = k; li[added++] = idx;
+        added++;
         logf_("grail: new %s #%d '%s' by %s", g_gr_kind[k], idx, gr_arr(k)[idx].name, f[i].who);
     }
     if (!added) return;
@@ -1159,7 +1160,6 @@ static void gr_apply(const gfind_t *f, int n, int quiet) {
     if (quiet) { g_scan_added += added; return; }
     if (added <= 3) {
         say(added == 1 ? L"[Quartermaster] Congratulations, you just discovered a new item for your Holy Grail quest!" : L"[Quartermaster] Congratulations, you just discovered new items for your Holy Grail quest!");
-        for (int i = 0; i < added; i++) say(L"[Quartermaster] \x01%hs%.50hs\x01" L"0", gr_color(lk[i]), gr_arr(lk[i])[li[i]].name);
     } else say(L"[Quartermaster] Congratulations, you discovered %d new Holy Grail items!", added);
     gr_progress();
 }
