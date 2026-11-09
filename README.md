@@ -7,6 +7,7 @@ A mod for Diablo II that adds a chat command storage system. The idea is to inte
 ## Screenshots
 
 | | |
+|---|---|
 | ![Screenshot 1](https://i.imgur.com/LRWxG6b.jpeg) | ![Screenshot 2](https://i.imgur.com/aN7546o.jpeg) |
 
 ## Features
