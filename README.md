@@ -1,25 +1,36 @@
 # Will Scarlet's Quartermaster for Diablo II
 
-A mod for Diablo II that adds a chat command storage system.
+A mod for Diablo II that adds a chat command storage system. The idea is to interact with an NPC you just can't see.
 
 **Note this was designed for D2LOD v1.13 and will not work on version 1.14.**
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Screenshot 1](https://i.imgur.com/LRWxG6b.jpeg) | ![Screenshot 2](https://i.imgur.com/aN7546o.jpeg) |
+
 ## Features
 
-This mod is intended to make storing common items a lot easier: rejuvination potions, gems, runes, and essences.
+This mod is intended to make storing common items a lot easier: potions, gems, runes, and essences.
 
 - ``.deposit`` - moves all storable items into the quartermaster bank
 - ``.take <NAME> <AMOUNT>`` - retreive items from the quartermaster bank
 - ``.storage`` - shows what is stored currently in the quartermaster bank
 - ``.storage potions|gems|runes|essences`` - shows what you have of that specific type
 
-The **Insert** key will perform the same action as the ``.deposit`` command.
+Pressing the ``Insert`` key will perform the same action as the ``.deposit`` command.
 
 ### Examples
 
+The mod is slightly forgiving on the shorthand names you can pass:
+
 ```
 .take rejuv 10
+.take potion 5
 .take shael 1
+.take cham rune 1
+.take perfect skull 1
 ```
 
 ### Cheats
