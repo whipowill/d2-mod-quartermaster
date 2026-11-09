@@ -1,0 +1,18 @@
+# toolchain (pip --target install, ~400MB); build.sh falls back to ../d2-mod-qol/.tools
+.tools/
+
+# machine-specific paths
+local.conf
+reset.sh
+
+# intermediates
+.out/
+
+# build/ holds only the deliverables (dll + ini), which are tracked
+build/*
+!build/quartermaster.dll
+!build/quartermaster.ini
+
+# runtime logs and editor junk
+*.log
+*.bak

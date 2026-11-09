@@ -1,0 +1,99 @@
+# Diablo II quartermaster (quartermaster.dll) - engineering notes
+
+Reverse-engineering facts and design decisions, organised by topic (the old chronological stage log was folded into these sections). CLAUDE.md has the summary, standing rules, status and build commands.
+The game facts this project depends on (module timestamps, hook signatures, Storm access) are in section 12. Addresses below are D2Game VAs for the stock 1.13d file (image base 0x6fc20000, md5 prefix 3d27210f)
+unless noted; **at runtime D2Game is rebased (seen at 0x02980000), so code always works with RVAs** (VA - 0x6fc20000). Items marked **[confirmed]** were verified in the real game; everything else is built from disassembly and only as good as the test noted.
+Analysis helper: a few lines of pefile + capstone (`get_memory_mapped_image()`, disassemble at a VA, scan `E8 rel32` for callers); it is not kept in the repo. Do not name a helper `dis.py`.
+
+## 1. Chat and the client side  [confirmed]
+- Single-player chat reaches D2Net SendPacket: client->server `15 01 00 <ANSI text> 00 00 00` (size = text + 6; the `arg` of SendPacket is 1 once in a game). The server echoes every line back as `26 01 00 02 00 00 00 00 00 4d <name>\0 <text>\0`,
+  so a command must be swallowed in `h_send` (return the last real send result, send nothing) or it appears as chat. Only our own commands are swallowed; other `.xyz` lines pass through (another mod may consume its own commands earlier, at the D2Client chat-send call +0xB2342, found by the pattern `8A 44 24 71 8D 74 24 70 C6 84 24 72 01 00 00 00 E8 ?? ?? ?? ?? E9`).
+- Replies: PrintGameString, D2Client +0x75EB0, `void __stdcall(const wchar_t *, int color)`. It must run on the game thread, so messages go through a locked queue (`say`, producers = game thread and server thread) and `h_recv` (game thread, every frame) prints them. Gated on D2Client ts 1318970890.
+- Hooks: SendPacket inline detour (chained behind any other mod's hook, see section 10), ReceivePacket IAT hook on D2Client (found by signature, ordinals differ between builds). `g_arg` (SendPacket's 2nd argument) is learned from the game's own gameplay packets (id < 0x60).
+- Commands (canonical names; aliases in CLAUDE.md): `.deposit`, `.withdraw`, `.storage`, `.lookup`, `.scan`, and the cheat `.spawn`. Printed instructions always use the canonical names.
+
+## 2. Running code on the SERVER thread without patching code  [confirmed]
+- Items belong to the server thread. The server dispatches client packets through a data table: D2Game 0x6fd1a698 (RVA 0xfa698), 8-byte `{handler, flag}` entries indexed by packet id, called as fastcall(ecx = game, edx = player, stack: buf, size), callee pops 8 (dispatcher 6fc873a0 rejects ids >= 0x67 and null handlers;
+  caller 6fcf5330 supplies the size). Patching code at the dispatcher call site would collide with any other mod that does the same, so we use the data table instead.
+- The byte-stream splitter uses D2Net's client->server SIZE table: VA 0x6fbfabd8 = D2Net RVA 0xabd8, dword per id (id 1.. = 5,9,5,9,5,9,9,5,9,9..., -1 = variable). Unused ids have size 0. Ids with a null server handler: 0x2b 0x4a 0x4e 0x55-57 0x5a-5c 0x64 0x65.
+- We take id **0x2b**: size[0x2b] = 9 and slot[0x2b] = {qm_srv, 1}, installed by `patch_thread` (re-checked every 500 ms because D2Game loads when a game starts) only when both entries are still zero, the neighbouring size entries are the stock values and the buy handler (slot 0x32 = RVA 0x6c190) is where it should be.
+- The client sends `2b <cmd> <u32 a> <u8 b> <u16 c>` (9 bytes) with `o_send(9, g_arg, p)`; the server thread runs `qm_srv`. Commands: 1 scan, 2 spawn, 3 spawn unique, 4 spawn set, 5 deposit (b = CAT_* mask), 6 withdraw (a = item code, 0 = full rejuv; b = amount).
+- Server code reaches D2Common through D2Game's own `jmp [IAT]` thunks (verify `FF 25` before use): RVA 0xa46c first inventory item, 0xa60a next item, 0xa508 item code (dword, space padded) -> item txt index (-1 unknown), 0xa59e item page, 0xa50e set previous page, 0xa5f8 player data (client id at +0x9c),
+  0xa5e6 item quality/kind, 0xa6fa save item to buffer. Inventory = player unit + 0x60; unit +0 type (0 player, 4 item), +4 class, +0xc guid, +0x10 mode (item: 0 stored, 1 equipped, 2 belt, 3 ground, 4 cursor, 6 socketed).
+
+## 3. Creating items: the spawn routine and its record  [confirmed for .spawn CODE]
+- **D2Game 0x6fd0b050** (RVA 0xeb050), found via the quest code that drops `gld ` piles (e.g. 6fc9d878): eax = code dword, ebx = unit to drop beside, stack (game, 2), ret 8, returns the item unit or 0. It resolves the code (thunk 0xa508), reads the unit's position (6fc2a4a2), finds a free spot (6fd00000), fills a 0x84-byte spawn record
+  (mode 3 = ground) and calls the creator 6fd03110 (RVA 0xe3110). The item level comes from the area, so spawned items are levelled to the player's area (an `amu` is a level-appropriate magic amulet: amulets cannot be normal, the game bumps them).
+- **Spawn record:** +0x00 owner unit, +0x08 game, +0x0c item level (1 if <= 0), +0x14 item txt index, +0x18 mode (3 ground), +0x1c x, +0x20 y, +0x24 free-spot object, +0x28 word flags (bit0 = add to world), +0x2c "ready-made item" flag (non-zero = restore a saved item using +0x34 quantity,
+  +0x38/+0x3c durability, +0x44 item flags, +0x48/+0x4c seed, +0x58..; NOT for generating), **+0x30 requested quality** (stock call passes 2 = normal; 1 low, 2 normal, 3 superior, 4 magic, 5 set, 6 rare, 7 unique, 8 crafted; when non-zero it replaces the rolled quality, 6fd020c3),
+  **+0x40 preferred unique/set row + 1** (0 = random). Consumers: creator 6fd03110 -> generator 6fd02040 (quality switch, jump table 6fd02658) -> unique maker 6fd00f10 / set picker 6fc4a9a0 (via 6fc4af60) -> finisher 6fd02690.
+- **Forced unique / set (built, untested):** the unique maker loops the runtime UniqueItems table (`root+0xc24`, count `+0xc28`, stride 0x14c, base item at row+0x28); the set picker loops SetItems (`root+0xc18`, count `+0xc1c`, stride 0x1b8, base item at row+0x28, level requirement a signed word at row+0x30);
+  `root = **(DWORD**)(g_dg + 0x6fd18260 - 0x6fc20000)`. Each takes row `[record+0x40] - 1` when its flags, base item and level requirement fit.
+  We cannot call the creator ourselves (the spawn routine builds the record), so `install_create_hook` puts a `jmp` over the creator's first 6 bytes (`83 EC 20 8B 41 70`, shape 1) or chains onto an existing `E9` (shape 2) to a stub that, only while `g_ovr_on` is set around our own spawn call,
+  overwrites record +0x30 (7 unique / 5 set), +0x40 (row + 1) and +0x0c (99). Installed lazily from the server thread, so nothing is executing inside the creator at that moment. It logs the bytes it found and refuses unknown ones.
+- **Row index = file row not counting the "Expansion" divider** (the game gives that divider row no id; the same rule holds for ItemTypes and MonStats). Names/codes come from UniqueItems.txt (`index`, `code`) and SetItems.txt (`index`, `item`) through Storm (`list_load`). The first log of `.spawn set 80` showed row #80 = "Tal Rasha's Horadric Crest", so the numbering matches the runtime table.
+- `.spawn` is the cheat gated by `[cheats] spawn` (client and server both check).
+
+## 4. Deposit: destroying an item the way a sale does  [confirmed for rejuvs]
+- Lesson: a client crashes in a D2Common assertion (null room) when the server announces item state changes in an order it never saw (e.g. a ground item that never left a container). A brand-new item has no old place, so create-then-pickup is safe; check packet order when trying new flows.
+- Packet table: 0x32 buy (17 bytes) -> 6fc8c190 -> worker 6fc93a50; 0x33 sell (17 bytes: npc id @1, item id @5, word @9, price @0xd) -> 6fc8b370 -> worker 6fc92a50. The sell worker clones the item into the vendor's inventory (buy-back list), credits gold (6fd009f0), and removes the original with the two calls we copy. Related: 6fd00ae0 (eax = game, esi = item) is a wrapper that tail-jumps the unit-free function 6fc8fc70 (the sell worker uses it to free a surplus clone); 6fcd44b0 places an item in the belt.
+- `destroy_item`: `6fc2a50e(item, 6fc2a59e(item))` (previous page = current page), then **6fcfec70** (RVA 0xdec70: eax = item, edi = player, ebx = client id, stack 0x20, ret 4; sends the client the 9d action 5 "remove from container"),
+  then **6fcd49c0** (RVA 0xb49c0: eax = player, esi = item, stack (game, 0), ret 8; removes from the owner and frees the unit through 6fc8fc70; the 0 means no second notify). Entry bytes of both are verified first. The callee overwrites its register operands, so the inline asm works on copies.
+- Collection rule: items with mode 0 (stored in a container) AND on the inventory or cube page (`INV_PAGE` 0, `CUBE_PAGE` 3, read with thunk 0xa59e; plus `STASH_PAGE` 4 when enabled). The game's internal grid numbers are inventory 0, equipment 1, trade 2, cube 3, stash 4, belt 5 (0xFF none); saved items/packets show them +1 (inventory 1, cube 4, stash 5).
+  Stash contents (page `STASH_PAGE` 4) are skipped unless `[storage] stash=1` (default 0 - the user did not want the stash touched); skipped items are counted and reported in chat and the log shows their page. Not the belt, cursor, equipment or sockets either. The page numbering comes from the known enum and the +1 save offset; if a deposit finds nothing or takes the wrong items,
+  the `deposit: taking ... from page N` / `left alone ... on page N` log lines show the real values. Class match by thunk 0xa508 on the item codes (rvs/rvl, gem and rune codes).
+
+## 5. Withdraw: ground spawn + the game's own pickup request  [confirmed for rejuvs]
+- The server creates N items beside the player with the section 3 spawn call and queues each item's guid (`item + 0xc`) on a locked queue (`g_pickq`). The CLIENT thread (`pick_pump`, from h_recv, one per 120 ms) sends the pickup request `16 04 00 00 00 <guid u32> 00 00 00 00` (13 bytes).
+  Pickups are not restricted in town.
+- Why items land in the inventory: the 0x16 handler (6fc8c5f0 -> 6fc8c1e0, case 4 = item) calls **6fcd68c0** when the packet's last dword is 0 - an auto-store (stacking via 6fcd66e0, free spot via 6fcd34b0, place, notify the client; potions go to the belt through 6fcd5510) - and 6fcd5bd0 (item to the CURSOR) when it is non-zero.
+  Our packet sends 0. If there is no room the item stays on the ground and the chat says so.
+- Limits: 40 per command (run it again for more), amount 1..255. Both ITEM and AMOUNT are required (the user does not want an "all" form).
+
+## 6. Storage file, item lists, safety order
+- `quartermaster.txt` in the game folder (cwd), shared by every character: `rejuv_halves=N` and one `<code>=<count>` line per gem/rune. Rejuvenation counts in halves: rvs = 1, rvl = 2; a withdrawal hands out only full rvl (2 halves each) and an odd half stays banked.
+  Written through a temp file + `MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH)`.
+- **Safety order = never LOSE an item:** deposit writes the file BEFORE destroying (and rewrites it if some destroys failed); withdraw writes AFTER creating. A crash in between can duplicate a few items (single player, accepted), never lose them.
+- Gem and rune lists come from the game's Misc.txt via Storm (`parse_misc_cb`): runes = type `rune` (name stored without " Rune"); gems = types gema/gemd/geme/gemr/gems/gemt/gemz (7 families x 5 grades; jewels excluded because they carry properties).
+  The client loads them before sending a command; the server only reads them.
+- `.storage` is client-side (`cmd_storage`, reads the file): no argument = totals for the enabled types; `gems` = one line per family (Misc.txt type, grouped in table order), grades highest first (label = the name minus the family base name, ranked chipped < flawed < normal < flawless < perfect,
+  family name pluralised from the base name, e.g. Ruby -> Rubies); `runes` = highest rune first, wrapped. Chat lines are cut at ~95 characters including the prefix, so reports wrap at 74 (`LINEMAX`) and `say` always terminates the buffer. `[storage] rejuv|gems|runes` switches each type (client and server check).
+
+- **Town-only option (`[storage] town_only`, default 0):** `town_ok(player)` runs at the start of the server-side deposit and withdraw (so it also covers the Insert key). The level number is read from the server unit: `unit+0x2c` (path) -> `+0x1c` room -> `+0x10` room data -> `+0x58` level -> `+0x1d0` level number
+  (+0x1d0 is confirmed by D2Common's own level builder; the rest is the standard 1.13 layout). Town levels 1, 40, 75, 103, 109. An unreadable chain refuses (fails closed). Every check logs `town check: level N -> ...`; if the option ever refuses in a town, that line shows the value that was read.
+  `.storage` and `.lookup` are read-only and always work.
+
+## 7. The deposit key
+- `[keys] deposit` (default Insert; a key name, F1-F12, a letter/digit, a VK number or `none`; `parse_key`). `key_thread` polls GetAsyncKeyState every 40 ms with an edge detector and fires only when the window is focused, the player exists (D2Client +0x613C0 = GetPlayer) and the chat box is closed
+  (UI var 5 = a DWORD at D2Client +0x11C890 + 5*4). It only sets `g_key_req`; `h_recv` (game thread) runs the deposit. Never call game code from the key thread.
+
+## 8. Item serialization and cloning (understood, not used yet)
+- The game clones an item by serializing it to bytes and loading them back. Clone routine **6fd02c40** (Items.cpp; eax = game, stack (item, 1 = also clone socketed children); ret 8): `6fc2a6fa(item, buf, 0x400, 1, 1, 0)` writes the item's save-format bytes and returns the size; `6fc2a7de(buf, size, 1, &P)` parses a header into a location struct;
+  loader **6fd02b70** (edi = game, esi = &P, stack: class, buf, size, 1, &status, 0x60; ret 0x18; creates the unit via 6fc8fe10) makes a NEW floating item; flags are set with `6fc2a766(item, flag, on)` (0x80000, 0x2000, 0x8000000); the vendor case inserts it with 6fcd71a0.
+- Consequence: the storage file could hold the real serialized bytes of ANY item (hex) and restore it exactly - the route to storing non-fungible items later. `.scan` logs every owned item's class, mode, guid and serialized hex to quartermaster.log (the format is not yet captured).
+- Assertion strings name the source files, which identifies functions: `ITEMS\Items.cpp` (0x6fd1af0c), `ITEMS\ItemMode.cpp` (0x6fd1b3ec; drop 6fcd7fc0, place-by-body-location 6fcd80f0, equip place 6fcd6350, cursor-to-container 6fcd7640, gold 6fcd49c0 is NOT gold: it is the destroy routine of section 4),
+  `INVENTORY\InvMode.cpp`, `PLAYER\PlrTrade.cpp`, `UNIT\SUNITNPC.CPP`, `PLAYER\PlrSave.cpp`. Debug string `ITEMSReadInfoFromStreamVersioned` at 0x6fd1e8e8.
+
+## 9. Other server facts found on the way
+- Packet 0x4f = click button (7 bytes: word button @1, word @3, word @5), handler 6fc8cf60 -> dispatcher 6fcb8210. Buttons 0x12-0x14 need interaction state 2 (stash gold), 0x17-0x18 need state 4 (cube open): 0x17 closes the cube, 0x18 = Transmute -> 6fcb7cb0 (walks the recipe table).
+  The cube's recipe executor was not traced (not needed: the spawn routine and the loader cover creation).
+- The game uses unit tables on `game`: monsters at +0x1320 (128 chains, next at +0xe4), items at +0x1720 (same layout), guid at +0xc.
+
+## 10. Coexistence with other mods that hook SendPacket (important)
+Another DLL may already have inline-hooked D2Net SendPacket, and some such hooks only accept the stock first byte `A1` (`mov eax,[abs]`), so they fail if we hook first. We therefore detect the stock shape (`A1`) or an existing `E9 jmp` (bytes 5..13 are the stock tail either way) and, when
+a mod of that kind is loaded, wait up to 30 s for its `E9` to appear and chain onto it (our trampoline re-creates its jmp). If nothing else is loaded we hook the stock bytes. The receive hook is an IAT hook on D2Client and chains naturally. The server-thread entry (section 2) is a data-table slot,
+so it cannot conflict with another mod's code patches. If another mod must load AFTER us, its inline hook needs the same `E9` tolerance.
+
+## 11. Test status
+- **[confirmed]** chat swallow + reply; `.spawn CODE [N]`; `.deposit` and `.withdraw` for rejuvenation potions ("works as well as can be expected").
+- **Untested:** forced uniques/sets (`.lookup jordan`, `.spawn unique stone of jordan`, `.spawn set 80`: if the quality is wrong the `spawn unique:` / `spawn set:` log lines show the index, the table row and the resulting quality; the `creator hook:` lines show what was found at the creator);
+  gems and runes (`.deposit gems|runes`, the Insert key, `.storage`, `.withdraw r12 2`, `.withdraw perfect amethyst 1`, usage text when the amount is missing, a type switched off in the ini); the Misc.txt line `Misc.txt: N gem(s), N rune(s)` shows whether the lists loaded.
+
+## 12. Game facts this project depends on (stock LoD 1.13d)
+- Module timestamps: D2Game 1318970639 (0x4E9DE50F), D2Client 1318970890; every patch is gated on them. Preferred bases D2Game 0x6fc20000, D2Client 0x6fab0000, D2Net 0x6fbf0000 (D2Game was seen relocated to 0x02980000, so always use RVAs).
+- D2Net export ordinals differ between builds, so the two hooked functions are found by code: SendPacket (stdcall ret 0xC) = `A1 <abs32> 85 C0 75 05 33 C0 C2 0C 00` (with the first 5 bytes possibly replaced by `E9`); ReceivePacket (stdcall ret 8, polled every frame - never log empty polls) =
+  `8B 44 24 04 50 8B 44 24 0C 68 <q> 68 <q+4> E8 ?? ?? ?? ?? C2 08` with q+4 equal to the second pushed constant. Send and receive each match exactly one export in D2Net.
+- Reading the game's own data tables: Storm.dll ordinals 268 SFileOpenFileEx, 265 SFileGetFileSize, 269 SFileReadFile, 253 SFileCloseFile, each verified by first bytes (`8B 4C 24 10 81 EC 10 01`, `56 57 8B 7C 24 10`, `8B 44 24 14 8B 4C 24 10`, `57`). #268 takes a search scope: 3 (loose Data folder first, then the archives)
+  when the command line contains `-direct`, else 0. Tables used: `Data\global\excel\UniqueItems.txt`, `SetItems.txt`, `Misc.txt`. Call from the game thread.
+- Never use IsBadReadPtr in hooks (it trips stack guard pages); use a VirtualQuery-based check.
+- Item and unit conventions are listed in section 2; the packet-level pickup format is in section 5.
