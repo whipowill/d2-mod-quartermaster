@@ -20,14 +20,14 @@ Cannot run the game under wine here; test in the real game. Install by copying t
 ## Commands and config
 | command | what it does |
 |---|---|
-| `.deposit [rejuv\|gems\|runes]` | inventory and cube items of that type (all enabled types if none given) -> storage file; the stash only when `[storage] stash=1` (default 0). The deposit key (default Insert) = `.deposit` with no argument |
-| `.withdraw ITEM AMOUNT` (alias `.take`) | ITEM = `rejuv`, an item code (`r12`, `gsv`) or a name; both arguments required, no "all"; up to 40 per command |
-| `.storage [rejuv\|gems\|runes]` | no argument: totals (`Storage: 5 Potions, 12 Gems, 3 Runes`; potions are whole potions, a leftover half is not shown); `gems`: one line per colour, best grade first; `runes`: highest rune first; `rejuv`: full and small counts |
+| `.deposit [rejuv\|gems\|runes\|essences]` | inventory and cube items of that type (all enabled types if none given) -> storage file; the stash only when `[storage] stash=1` (default 0). The deposit key (default Insert) = `.deposit` with no argument |
+| `.withdraw ITEM AMOUNT` (alias `.take`) | ITEM = `rejuv`, an item code (`r12`, `gsv`), a name, or an essence (`burning`, `terror`); both arguments required, no "all"; up to 40 per command |
+| `.storage [rejuv\|gems\|runes\|essences]` | no argument: totals (`Storage: 5 Potions, 12 Gems, 3 Runes`; potions are whole potions, a leftover half is not shown); `gems`: one line per colour, best grade first; `runes`: highest rune first; `essences`: the four boss essences by short name (Burning, Festering, Twisted, Charged); `rejuv`: full and small counts |
 | `.lookup WORDS` (alias `.find`) | finds unique and set items by name (code and #index) |
 | `.spawn CODE [N]`, `.spawn unique\|u NAME\|#N`, `.spawn set\|s NAME\|#N` | cheat, off unless `[cheats] spawn=1` |
 | `.scan` | diagnostic: logs every owned item's class, mode, guid and serialized bytes |
 
-`quartermaster.ini`: `[quartermaster] enabled, logging`; `[storage] rejuv, gems, runes` (1 each) `stash` (0) and `town_only` (1); `[keys] deposit=Insert` (name, F1-F12, letter/digit, VK number or `none`); `[cheats] spawn=0`.
+`quartermaster.ini`: `[quartermaster] enabled, logging`; `[storage] rejuv, gems, runes, essences` (1 each) `stash` (0) and `town_only` (1); `[keys] deposit=Insert` (name, F1-F12, letter/digit, VK number or `none`); `[cheats] spawn=0`.
 Rejuvenation is stored in halves (rvs = 1, rvl = 2); withdrawals hand out only full ones.
 
 ## Status
