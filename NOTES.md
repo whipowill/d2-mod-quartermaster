@@ -59,7 +59,7 @@ Analysis helper: a few lines of pefile + capstone (`get_memory_mapped_image()`, 
 - `.storage` is client-side (`cmd_storage`, reads the file): no argument = totals for the enabled types; `gems` = one line per family (Misc.txt type, grouped in table order), grades highest first (label = the name minus the family base name, ranked chipped < flawed < normal < flawless < perfect,
   family name pluralised from the base name, e.g. Ruby -> Rubies); `runes` = highest rune first, wrapped. Chat lines are cut at ~95 characters including the prefix, so reports wrap at 74 (`LINEMAX`) and `say` always terminates the buffer. `[storage] rejuv|gems|runes` switches each type (client and server check).
 
-- **Town-only option (`[storage] town_only`, default 0):** `town_ok(player)` runs at the start of the server-side deposit and withdraw (so it also covers the Insert key). The level number is read from the server unit: `unit+0x2c` (path) -> `+0x1c` room -> `+0x10` room data -> `+0x58` level -> `+0x1d0` level number
+- **Town-only option (`[storage] town_only`, default 1):** `town_ok(player)` runs at the start of the server-side deposit and withdraw (so it also covers the Insert key). The level number is read from the server unit: `unit+0x2c` (path) -> `+0x1c` room -> `+0x10` room data -> `+0x58` level -> `+0x1d0` level number
   (+0x1d0 is confirmed by D2Common's own level builder; the rest is the standard 1.13 layout). Town levels 1, 40, 75, 103, 109. An unreadable chain refuses (fails closed). Every check logs `town check: level N -> ...`; if the option ever refuses in a town, that line shows the value that was read.
   `.storage` and `.lookup` are read-only and always work.
 

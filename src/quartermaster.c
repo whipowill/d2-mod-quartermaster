@@ -14,7 +14,7 @@
 
 static FILE *g_log;
 static int g_st_rejuv = 1, g_st_gems = 1, g_st_runes = 1;   // ini [storage] rejuv / gems / runes: which item types the quartermaster keeps
-static int g_town_only = 0;                                // ini [storage] town_only: 1 = .deposit / .withdraw / the deposit key only work in a town (default off)
+static int g_town_only = 1;                                // ini [storage] town_only: 1 = .deposit / .withdraw / the deposit key only work in a town (default on)
 static int g_st_stash = 0;                                 // ini [storage] stash: 1 = deposit also takes items from the stash (default off)
 static int g_key_deposit = 0x2D;                           // ini [keys] deposit (default Insert, VK_INSERT); 0 = no key
 static int g_cheat_spawn = 0;               // ini [cheats] spawn: .spawn / .spawn unique / .spawn set (default off)
@@ -492,8 +492,8 @@ static void srv_take(DWORD game, DWORD player, DWORD code, int want) {
     }
     if (made) { if (rejuv) st.halves -= 2 * made; else store_add(&st, code, -made); if (!store_save(&st)) logf_("take: could not write %s", STORE_FILE); }
     logf_("take: '%s' wanted %d, created %d, left %d", cc, want, made, rejuv ? st.halves : store_get(&st, code));
-    if (made < want && made == n && n < want) say(L"[quartermaster] took %d %hs(s) (limit per command or storage); anything that does not fit stays on the ground", made, nm);
-    else say(L"[quartermaster] took %d %hs(s); anything that does not fit stays on the ground", made, nm);
+    if (made < want && made == n && n < want) say(L"[quartermaster] took %d %hs(s) (limit per command or storage)", made, nm);
+    else say(L"[quartermaster] took %d %hs(s)", made, nm);
 }
 
 // The packet handler the server thread calls: fastcall(ecx = game, edx = player, buf, size); callee pops the two stack args.
@@ -990,7 +990,7 @@ static int load_config(void) {            // returns [quartermaster] enabled
                   "; 1 = .deposit and the deposit key also take items from the stash (the inventory and Horadric Cube are always included), 0 = leave the stash alone\r\n"
                   "stash=0\r\n"
                   "; 1 = .deposit, .withdraw and the deposit key only work while you are in a town, 0 = they work anywhere\r\n"
-                  "town_only=0\r\n"
+                  "town_only=1\r\n"
                   "\r\n"
                   "[keys]\r\n"
                   "; key that deposits everything switched on above (same as typing .deposit): a name (Insert, Delete, Home, End, PageUp,\r\n"
@@ -1009,7 +1009,7 @@ static int load_config(void) {            // returns [quartermaster] enabled
     g_st_gems = GetPrivateProfileIntA("storage", "gems", 1, path) != 0;
     g_st_runes = GetPrivateProfileIntA("storage", "runes", 1, path) != 0;
     g_st_stash = GetPrivateProfileIntA("storage", "stash", 0, path) != 0;
-    g_town_only = GetPrivateProfileIntA("storage", "town_only", 0, path) != 0;
+    g_town_only = GetPrivateProfileIntA("storage", "town_only", 1, path) != 0;
     { char kb[32]; GetPrivateProfileStringA("keys", "deposit", "Insert", kb, sizeof kb, path); g_key_deposit = parse_key(kb); }
     return GetPrivateProfileIntA("quartermaster", "enabled", 1, path) != 0;
 }

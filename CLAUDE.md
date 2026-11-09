@@ -27,7 +27,7 @@ Cannot run the game under wine here; test in the real game. Install by copying t
 | `.spawn CODE [N]`, `.spawn unique\|u NAME\|#N`, `.spawn set\|s NAME\|#N` | cheat, off unless `[cheats] spawn=1` |
 | `.scan` | diagnostic: logs every owned item's class, mode, guid and serialized bytes |
 
-`quartermaster.ini`: `[quartermaster] enabled, logging`; `[storage] rejuv, gems, runes` (1 each) `stash` (0) and `town_only` (0); `[keys] deposit=Insert` (name, F1-F12, letter/digit, VK number or `none`); `[cheats] spawn=0`.
+`quartermaster.ini`: `[quartermaster] enabled, logging`; `[storage] rejuv, gems, runes` (1 each) `stash` (0) and `town_only` (1); `[keys] deposit=Insert` (name, F1-F12, letter/digit, VK number or `none`); `[cheats] spawn=0`.
 Rejuvenation is stored in halves (rvs = 1, rvl = 2); withdrawals hand out only full ones.
 
 ## Status
