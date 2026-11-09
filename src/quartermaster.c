@@ -1,5 +1,5 @@
 // quartermaster.dll - Diablo II (stock LoD 1.13d) chat-command item storage ("quartermaster"), single player.
-// Commands: .deposit [rejuv|gems|runes], .withdraw ITEM AMOUNT (alias .take), .storage, .lookup WORDS (alias .find), .scan (diagnostic) and the
+// Commands: .deposit [rejuv|gems|runes], .take ITEM AMOUNT (alias .withdraw), .storage, .lookup WORDS (alias .find), .scan (diagnostic) and the
 // cheat .spawn (off unless [cheats] spawn=1). The deposit key (default Insert) does the same as .deposit. See CLAUDE.md (summary) and NOTES.md (engineering notes).
 //
 //   - send hook:    inline detour of D2Net SendPacket(size, arg, packet). Order-independent with qol.dll, which hooks the same
@@ -14,7 +14,7 @@
 
 static FILE *g_log;
 static int g_st_rejuv = 1, g_st_gems = 1, g_st_runes = 1, g_st_ess = 1;   // ini [storage] rejuv / gems / runes / essences: which item types the quartermaster keeps
-static int g_town_only = 1;                                // ini [storage] town_only: 1 = .deposit / .withdraw / the deposit key only work in a town (default on)
+static int g_town_only = 1;                                // ini [storage] town_only: 1 = .deposit / .take / the deposit key only work in a town (default on)
 static int g_st_stash = 0;                                 // ini [storage] stash: 1 = deposit also takes items from the stash (default off)
 static int g_key_deposit = 0x2D;                           // ini [keys] deposit (default Insert, VK_INSERT); 0 = no key
 static int g_cheat_spawn = 0;               // ini [cheats] spawn: .spawn / .spawn unique / .spawn set (default off)
@@ -62,7 +62,7 @@ static send_t o_send; static recv_t o_recv;
 #define D2CLIENT_TIMESTAMP_113D 1318970890u
 typedef void (__stdcall *print_t)(const wchar_t *msg, int color);
 static print_t p_print;
-#define MSGQ 8
+#define MSGQ 24
 static wchar_t g_msgq[MSGQ][96]; static int g_msg_head, g_msg_tail;
 static CRITICAL_SECTION g_cs;                                             // producers: the game thread (chat) and the SERVER thread (our packet handler); consumer: h_recv
 static void say(const wchar_t *fmt, ...) {
@@ -77,6 +77,26 @@ static void say(const wchar_t *fmt, ...) {
     }
     LeaveCriticalSection(&g_cs);
 }
+// Chat-style output: "Quartermaster" in gold, the colon and text in white, every number in gold (inline colour codes: U+00FF 'c' digit).
+// The codes use up characters, so say_wrapped() counts them (eff_len) to keep lines under the ~95 character cut.
+static int is_numstart(const wchar_t *m, const wchar_t *c) { return *c >= L'0' && *c <= L'9' && (c == m || (!iswalnum(c[-1]) && c[-1] != L'#')); }
+static void colorize(const wchar_t *in, wchar_t *out, size_t cap) {
+    static const wchar_t gold[] = L"\u00FFc4Quartermaster\u00FFc0: ", grey[] = L"\u00FFc4", white[] = L"\u00FFc0";
+    static const wchar_t pre[] = L"[Quartermaster] ";
+    size_t o = 0;
+    if (!wcsncmp(in, pre, 16)) { wcscpy(out, gold); o = wcslen(gold); in += 16; }
+    const wchar_t *m = in;
+    for (const wchar_t *c = in; *c && o + 12 < cap; ) {
+        if (is_numstart(m, c)) {
+            wcscpy(out + o, grey); o += 3;
+            while (*c >= L'0' && *c <= L'9' && o + 6 < cap) out[o++] = *c++;
+            wcscpy(out + o, white); o += 3;
+        } else if (*c == 1 && c[1]) {                                  // marker \x01 + colour char = inline colour code (gem names)
+            wcscpy(out + o, L"\u00FFc"); o += 2; out[o++] = c[1]; c += 2;
+        } else out[o++] = *c++;
+    }
+    out[o] = 0;
+}
 static void say_flush(void) {
     for (;;) {
         wchar_t m[96];
@@ -85,7 +105,7 @@ static void say_flush(void) {
         memcpy(m, g_msgq[g_msg_tail], sizeof m);
         g_msg_tail = (g_msg_tail + 1) % MSGQ;
         LeaveCriticalSection(&g_cs);
-        if (p_print) p_print(m, 0);                                       // game thread only
+        { wchar_t o[192]; colorize(m, o, 192); if (p_print) p_print(o, 0); }                                       // game thread only
     }
 }
 
@@ -237,10 +257,10 @@ static int thunk_ok(DWORD rva) { BYTE *p = (BYTE *)(g_dg + rva); return readable
 // Read-only. The thunks are D2Game's own stdcall jmp-thunks into D2Common (RVA 0xa46c first item of an inventory, 0xa60a next item,
 // 0xa6fa save-item-to-buffer(item, buf, 0x400, 1, 1, 0) -> size); first/next/save were identified from the sell/clone code (NOTES.md sections 2, 4 and 8).
 static void srv_scan(DWORD player) {
-    if (!thunk_ok(0xa46c) || !thunk_ok(0xa60a) || !thunk_ok(0xa6fa)) { say(L"[quartermaster] scan: unexpected D2Game build"); return; }
+    if (!thunk_ok(0xa46c) || !thunk_ok(0xa60a) || !thunk_ok(0xa6fa)) { say(L"[Quartermaster] Scan failed: unexpected game version."); return; }
     if (!readable((void *)player, 0x70)) return;
     DWORD inv = *(DWORD *)(player + 0x60);
-    if (!inv || !readable((void *)inv, 0x10)) { say(L"[quartermaster] scan: no inventory"); return; }
+    if (!inv || !readable((void *)inv, 0x10)) { say(L"[Quartermaster] Scan failed: no inventory."); return; }
     int n = 0;
     for (DWORD it = ((dg_fn1)(g_dg + 0xa46c))(inv); it && n < 100 && readable((void *)it, 0x20); it = ((dg_fn1)(g_dg + 0xa60a))(it)) {
         if (*(DWORD *)it != 4) continue;                                  // unit type 4 = item
@@ -253,7 +273,7 @@ static void srv_scan(DWORD player) {
         n++;
     }
     logf_("scan: %d item(s)", n);
-    say(L"[quartermaster] scanned %d item(s); see quartermaster.log", n);
+    say(L"[Quartermaster] Scanned %d item(s). Details are in the log.", n);
 }
 
 // Server-side: create an item by its 4-character code and drop it beside the player, exactly as the game does for quest gold:
@@ -270,14 +290,14 @@ static DWORD call_spawn(DWORD fn, DWORD code, DWORD unit, DWORD game) {
 static void srv_spawn(DWORD game, DWORD player, DWORD code, int count) {
     static const BYTE head[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};
     BYTE *fn = (BYTE *)(g_dg + 0xeb050);
-    if (!thunk_ok(0xa508) || !readable(fn, sizeof head) || memcmp(fn, head, sizeof head)) { say(L"[quartermaster] spawn: unexpected D2Game build"); return; }
+    if (!thunk_ok(0xa508) || !readable(fn, sizeof head) || memcmp(fn, head, sizeof head)) { say(L"[Quartermaster] Spawn failed: unexpected game version."); return; }
     char c[5] = {(char)code, (char)(code >> 8), (char)(code >> 16), (char)(code >> 24), 0};
-    if (((dg_fn1)(g_dg + 0xa508))(code) == 0xFFFFFFFFu) { logf_("spawn: unknown item code '%s'", c); say(L"[quartermaster] unknown item code '%hs'", c); return; }
+    if (((dg_fn1)(g_dg + 0xa508))(code) == 0xFFFFFFFFu) { logf_("spawn: unknown item code '%s'", c); say(L"[Quartermaster] I don't know the item code '%hs'.", c); return; }
     if (!readable((void *)player, 0x70) || *(DWORD *)player != 0) return;
     int made = 0;
     for (int i = 0; i < count; i++) { DWORD it = call_spawn((DWORD)fn, code, player, game); if (it) made++; else break; }
     logf_("spawn: '%s' x%d -> %d created", c, count, made);
-    say(L"[quartermaster] spawned %d x '%hs'", made, c);
+    say(L"[Quartermaster] Spawned %d x '%hs'.", made, c);
 }
 
 // ---- forcing a specific unique -------------------------------------------------------------------------------
@@ -328,9 +348,9 @@ static int install_create_hook(void) {
 static void srv_spawn_special(DWORD game, DWORD player, DWORD code, int uidx, int set) {      // set: quality 5 + SetItems row, else quality 7 + UniqueItems row
     static const BYTE head[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};
     BYTE *fn = (BYTE *)(g_dg + 0xeb050);
-    if (!thunk_ok(0xa508) || !readable(fn, sizeof head) || memcmp(fn, head, sizeof head)) { say(L"[quartermaster] spawn: unexpected D2Game build"); return; }
+    if (!thunk_ok(0xa508) || !readable(fn, sizeof head) || memcmp(fn, head, sizeof head)) { say(L"[Quartermaster] Spawn failed: unexpected game version."); return; }
     char c[5] = {(char)code, (char)(code >> 8), (char)(code >> 16), (char)(code >> 24), 0};
-    if (((dg_fn1)(g_dg + 0xa508))(code) == 0xFFFFFFFFu) { logf_("spawn special: unknown base code '%s'", c); say(L"[quartermaster] unknown base item code '%hs'", c); return; }
+    if (((dg_fn1)(g_dg + 0xa508))(code) == 0xFFFFFFFFu) { logf_("spawn special: unknown base code '%s'", c); say(L"[Quartermaster] I don't know the base item code '%hs'.", c); return; }
     DWORD *gp = (DWORD *)(g_dg + (0x6fd18260 - 0x6fc20000));              // D2Game global: pointer to the data-table root pointer
     if (!readable(gp, 4) || !readable((void *)*gp, 4)) return;
     BYTE *root = (BYTE *)*(DWORD *)*gp;
@@ -339,12 +359,12 @@ static void srv_spawn_special(DWORD game, DWORD player, DWORD code, int uidx, in
     size_t stride = set ? 0x1b8 : 0x14c;                                  // SetItems rows 0x1b8 bytes at root+0xc18 (count +0xc1c); UniqueItems rows 0x14c at root+0xc24 (count +0xc28)
     int count = *(int *)(root + (set ? 0xc1c : 0xc28));
     BYTE *tab = (BYTE *)*(DWORD *)(root + (set ? 0xc18 : 0xc24));
-    if (uidx < 0 || uidx >= count || !readable(tab + (size_t)uidx * stride, stride)) { logf_("spawn %s: index %d outside the game's table (%d rows)", kind, uidx, count); say(L"[quartermaster] %hs #%d is not in the game's table (%d rows)", kind, uidx, count); return; }
+    if (uidx < 0 || uidx >= count || !readable(tab + (size_t)uidx * stride, stride)) { logf_("spawn %s: index %d outside the game's table (%d rows)", kind, uidx, count); say(L"[Quartermaster] The %hs #%d is not in the game's table.", kind, uidx, count); return; }
     logf_("spawn %s: index %d base '%s' (table row dwords: %lx %lx %lx %lx %lx %lx)", kind, uidx, c,
           (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[0], (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[1], (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[2],
           (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[3], (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[4], (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[5]);
     if (!readable((void *)player, 0x70) || *(DWORD *)player != 0) return;
-    if (!install_create_hook()) { say(L"[quartermaster] cannot install the creator hook on this build"); return; }
+    if (!install_create_hook()) { say(L"[Quartermaster] I can't do that on this game version."); return; }
     g_ovr_quality = set ? 5 : 7; g_ovr_unique1 = (DWORD)uidx + 1; g_ovr_ilvl = 99;
     g_ovr_on = 1;
     DWORD it = call_spawn((DWORD)fn, code, player, game);
@@ -352,7 +372,7 @@ static void srv_spawn_special(DWORD game, DWORD player, DWORD code, int uidx, in
     DWORD q = 0;
     if (it && readable((void *)it, 0x20) && thunk_ok(0xa5e6)) q = ((dg_fn1)(g_dg + 0xa5e6))(it);        // D2Common: item quality
     logf_("spawn %s: item=%lx quality=%lu", kind, (unsigned long)it, (unsigned long)q);
-    say(it ? L"[quartermaster] spawned %hs #%d (quality %lu)" : L"[quartermaster] %hs #%d: nothing created", kind, uidx, (unsigned long)q);
+    say(it ? L"[Quartermaster] spawned %hs #%d (quality %lu)" : L"[Quartermaster] %hs #%d: nothing created", kind, uidx, (unsigned long)q);
 }
 
 // ---- deposit / take (server thread) ---------------------------------------------------------------------------
@@ -396,8 +416,8 @@ static int town_ok(DWORD player) {                                              
     int lvl = player_level(player);
     int town = lvl == 1 || lvl == 40 || lvl == 75 || lvl == 103 || lvl == 109;
     logf_("town check: level %d -> %s", lvl, lvl <= 0 ? "unknown (refused)" : town ? "town" : "not town (refused)");
-    if (lvl <= 0) { say(L"[quartermaster] cannot tell where you are, so the quartermaster stays closed (town_only=1)"); return 0; }
-    if (!town) { say(L"[quartermaster] the quartermaster only works in town"); return 0; }
+    if (lvl <= 0) { say(L"[Quartermaster] I can't tell where you are, so I'm closed."); return 0; }
+    if (!town) { say(L"[Quartermaster] I only work in town."); return 0; }
     return 1;
 }
 
@@ -407,11 +427,17 @@ static int town_ok(DWORD player) {                                              
 #define CUBE_PAGE 3
 #define STASH_PAGE 4
 // Appends "N what" to buf (", " separated); a zero count adds nothing.
-static void add_part(char *buf, size_t cap, int n, const char *what) {
+static void add_part_sep(char *buf, size_t cap, int n, const char *what, const char *sep) {
     if (n <= 0) return;
     size_t l = strlen(buf);
-    snprintf(buf + l, cap - l, "%s%d %s", l ? ", " : "", n, what);
+    snprintf(buf + l, cap - l, "%s%d %s", l ? sep : "", n, what);
 }
+static void add_part_nf(char *buf, size_t cap, int n, const char *what) {      // label first: "Gems 12"
+    if (n <= 0) return;
+    size_t l = strlen(buf);
+    snprintf(buf + l, cap - l, "%s%s %d", l ? " " : "", what, n);
+}
+static void add_part(char *buf, size_t cap, int n, const char *what) { add_part_sep(buf, cap, n, what, ", "); }      // sentences (deposit summary)
 #define CAT_REJUV 1
 #define CAT_GEMS 2
 #define CAT_RUNES 4
@@ -421,13 +447,13 @@ static int cat_mask_enabled(void) { return (g_st_rejuv ? CAT_REJUV : 0) | (g_st_
 // .deposit [rejuv|gems|runes]: every item in the inventory or the cube, plus the stash when [storage] stash=1 (never the belt, hands, equipment or sockets) of the chosen, enabled types
 // goes to the file. mask = CAT_* bits.
 static void srv_deposit(DWORD game, DWORD player, int mask) {
-    if (!thunk_ok(0xa46c) || !thunk_ok(0xa60a) || !thunk_ok(0xa508)) { say(L"[quartermaster] deposit: unexpected D2Game build"); return; }
+    if (!thunk_ok(0xa46c) || !thunk_ok(0xa60a) || !thunk_ok(0xa508)) { say(L"[Quartermaster] Deposit failed: unexpected game version."); return; }
     if (!readable((void *)player, 0x70) || *(DWORD *)player != 0) return;
     if (!town_ok(player)) return;
     DWORD inv = *(DWORD *)(player + 0x60);
     if (!inv || !readable((void *)inv, 0x10)) return;
     mask &= cat_mask_enabled();
-    if (!mask) { say(L"[quartermaster] that item type is switched off in quartermaster.ini ([storage])"); return; }
+    if (!mask) { say(L"[Quartermaster] That item type is not allowed."); return; }
     dg_fn1 cls_of = (dg_fn1)(g_dg + 0xa508);
     DWORD cs = cls_of(0x20737672), cl = cls_of(0x206c7672);                                      // "rvs ", "rvl "
     DWORD gcls[64], rcls[64], ecls[16];
@@ -435,7 +461,7 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
     for (int i = 0; i < g_nrunes; i++) rcls[i] = cls_of(*(DWORD *)g_runes[i].code);
     for (int i = 0; i < g_ness; i++) ecls[i] = cls_of(*(DWORD *)g_ess[i].code);
     struct { DWORD item, code; int halves; } list[300]; int n = 0, guard = 0, skipped = 0;
-    if (!thunk_ok(0xa59e)) { say(L"[quartermaster] deposit: unexpected D2Game build"); return; }
+    if (!thunk_ok(0xa59e)) { say(L"[Quartermaster] Deposit failed: unexpected game version."); return; }
     for (DWORD it = ((dg_fn1)(g_dg + 0xa46c))(inv); it && guard++ < 3000 && is_item(it); it = ((dg_fn1)(g_dg + 0xa60a))(it)) {
         if (*(DWORD *)(it + 0x10) != 0 || n >= 300) continue;                                   // mode 0 = stored in a container
         DWORD cls = *(DWORD *)(it + 4);
@@ -456,14 +482,14 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
         list[n].item = it; list[n].code = code; list[n++].halves = halves;
     }
     if (!n) {
-        if (skipped) say(L"[quartermaster] nothing to deposit from your inventory or cube (%d matching item(s) were left alone: the stash is off in quartermaster.ini)", skipped);
-        else say(L"[quartermaster] nothing to deposit");
+        if (skipped) say(L"[Quartermaster] Nothing to deposit. I left %d item(s) in the stash alone.", skipped);
+        else say(L"[Quartermaster] Nothing to deposit.");
         return;
     }
     static store_t before, after;                                                                 // large; the server thread is single
     store_load(&before); after = before;
     for (int i = 0; i < n; i++) { if (list[i].code) store_add(&after, list[i].code, 1); else after.halves += list[i].halves; }
-    if (!store_save(&after)) { logf_("deposit: could not write %s", STORE_FILE); say(L"[quartermaster] could not write the storage file; nothing was deposited"); return; }
+    if (!store_save(&after)) { logf_("deposit: could not write %s", STORE_FILE); say(L"[Quartermaster] I could not write the storage file. Nothing was deposited."); return; }
     int done = 0, nr = 0, ng = 0, nu = 0, ne = 0; after = before;
     for (int i = 0; i < n; i++) {
         if (!destroy_item(game, player, list[i].item)) continue;
@@ -476,9 +502,9 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
     {   // the receipt lists only what was actually deposited
         char rec[120] = "";
         add_part(rec, sizeof rec, nr, "potion(s)"); add_part(rec, sizeof rec, ng, "gem(s)"); add_part(rec, sizeof rec, nu, "rune(s)"); add_part(rec, sizeof rec, ne, "essence(s)");
-        if (rec[0]) say(L"[quartermaster] deposited %hs", rec); else say(L"[quartermaster] nothing could be deposited");
+        if (rec[0]) say(L"[Quartermaster] Deposited %hs.", rec); else say(L"[Quartermaster] nothing could be deposited");
     }
-    if (skipped) say(L"[quartermaster] %d matching item(s) were left alone (the stash is off in quartermaster.ini)", skipped);
+    if (skipped) say(L"[Quartermaster] I left %d item(s) in the stash alone.", skipped);
 }
 
 // .take ITEM AMOUNT: create up to AMOUNT of the item beside the player and queue them for the client to pick up (the game's own pickup
@@ -486,25 +512,25 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
 static void srv_take(DWORD game, DWORD player, DWORD code, int want) {
     static const BYTE head[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};
     BYTE *fn = (BYTE *)(g_dg + 0xeb050);
-    if (!thunk_ok(0xa508) || !readable(fn, sizeof head) || memcmp(fn, head, sizeof head)) { say(L"[quartermaster] take: unexpected D2Game build"); return; }
+    if (!thunk_ok(0xa508) || !readable(fn, sizeof head) || memcmp(fn, head, sizeof head)) { say(L"[Quartermaster] Take failed: unexpected game version."); return; }
     if (!readable((void *)player, 0x70) || *(DWORD *)player != 0) return;
     if (!town_ok(player)) return;
     int rejuv = (code == 0), kd = KIND_GEM;
     const mitem_t *mi = NULL;
-    if (rejuv) { if (!g_st_rejuv) { say(L"[quartermaster] rejuvenation storage is switched off in quartermaster.ini"); return; } code = 0x206c7672; }
+    if (rejuv) { if (!g_st_rejuv) { say(L"[Quartermaster] Potion storage is not allowed."); return; } code = 0x206c7672; }
     else {
         mi = misc_find_code(code, &kd);
-        if (!mi || !kind_enabled(kd)) { say(L"[quartermaster] that item cannot be taken (unknown, or its type is switched off)"); return; }
+        if (!mi || !kind_enabled(kd)) { say(L"[Quartermaster] That item cannot be taken."); return; }
     }
-    if (((dg_fn1)(g_dg + 0xa508))(code) == 0xFFFFFFFFu) { say(L"[quartermaster] take: that item is not defined in this game's data"); return; }
+    if (((dg_fn1)(g_dg + 0xa508))(code) == 0xFFFFFFFFu) { say(L"[Quartermaster] That item is not defined in this game's data."); return; }
     static store_t st;
     store_load(&st);
     int have = rejuv ? st.halves / 2 : store_get(&st, code);
     char cc[5] = {(char)code, (char)(code >> 8), (char)(code >> 16), (char)(code >> 24), 0};
     char nmbuf[40];
     if (!rejuv && kd == KIND_ESS) { ess_short(mi, nmbuf, 24); strcat(nmbuf, " essence"); }      // "Burning essence"
-    const char *nm = rejuv ? "full rejuvenation potion" : kd == KIND_ESS ? nmbuf : mi->name;
-    if (have < 1) { say(L"[quartermaster] storage holds no %hs", nm); return; }
+    const char *nm = rejuv ? "Full Rejuvenation Potion" : kd == KIND_ESS ? nmbuf : mi->name;
+    if (have < 1) { say(L"[Quartermaster] I hold no %hs for you.", nm); return; }
     int n = want < 1 ? 1 : want;
     if (n > have) n = have;
     if (n > 40) n = 40;                                                                          // one batch; run the command again for more
@@ -517,8 +543,8 @@ static void srv_take(DWORD game, DWORD player, DWORD code, int want) {
     }
     if (made) { if (rejuv) st.halves -= 2 * made; else store_add(&st, code, -made); if (!store_save(&st)) logf_("take: could not write %s", STORE_FILE); }
     logf_("take: '%s' wanted %d, created %d, left %d", cc, want, made, rejuv ? st.halves : store_get(&st, code));
-    if (made < want && made == n && n < want) say(L"[quartermaster] took %d %hs(s) (limit per command or storage)", made, nm);
-    else say(L"[quartermaster] took %d %hs(s)", made, nm);
+    if (made < want && made == n && n < want) say(L"[Quartermaster] Took %d %hs(s). That is all I could give.", made, nm);
+    else say(L"[Quartermaster] Took %d %hs(s).", made, nm);
 }
 
 // The packet handler the server thread calls: fastcall(ecx = game, edx = player, buf, size); callee pops the two stack args.
@@ -604,10 +630,10 @@ static void pick_pump(void) {
 // .deposit and the deposit key. mask = CAT_* bits; the config switches are applied here and again on the server.
 static void do_deposit(int mask) {
     mask &= cat_mask_enabled();
-    if (!mask) { say(L"[quartermaster] that item type is switched off in quartermaster.ini ([storage])"); return; }
+    if (!mask) { say(L"[Quartermaster] That item type is not allowed."); return; }
     if ((mask & (CAT_GEMS | CAT_RUNES | CAT_ESS)) && !misc_load()) mask &= CAT_REJUV;                  // Misc.txt unreadable: rejuvenation potions only
-    if (!mask) { say(L"[quartermaster] Misc.txt could not be read"); return; }
-    if (!send_cmd(QM_CMD_DEPOSIT, 0, mask, 0)) say(L"[quartermaster] not ready (start or join a game first)");
+    if (!mask) { say(L"[Quartermaster] I could not read the item list."); return; }
+    if (!send_cmd(QM_CMD_DEPOSIT, 0, mask, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
 }
 // The key: polled on its own thread (never runs game code); when it fires in a game, in the focused window, with the chat box closed, it sets
 // g_key_req and the next h_recv (game thread) does the deposit. Same guards as qol-ui's keys: D2Client +0x613C0 = GetPlayer, UI var 5 = chat box.
@@ -648,7 +674,7 @@ static int parse_key(const char *v) {
 // ---- unique items by name (client side) ------------------------------------------------------------------
 // UniqueItems.txt is read through Storm like the game does. The unique's runtime index is its row number NOT counting the "Expansion"
 // divider (same rule as ItemTypes/MonStats in qol). Columns used: `index` (name key) and `code` (base item).
-typedef struct { char name[56]; char code[4]; } uniq_t;
+typedef struct { char name[56]; char code[4]; char key[56]; char done; } uniq_t;   // name = what the game shows, key = the txt `index` string-table key
 static uniq_t g_uniq[800], g_set[400]; static int g_uniq_n = -9, g_set_n = -9;     // -9 = not loaded yet, -1 = could not be read
 static uniq_t *g_pt; static int g_pmax; static const char *g_codecol;               // parser target (uniques: column `code`; sets: column `item`)
 static int parse_list_cb(const char *txt, int len) {
@@ -682,12 +708,46 @@ static int parse_list_cb(const char *txt, int len) {
     }
     return n;
 }
+// The `index` column is a string-table KEY; the game shows the table's value (e.g. key "McAuley's Paragon" shows "Sander's Paragon").
+// The .tbl files are read through Storm and each row's name is replaced by its value, so .lookup / .spawn match and print what players see.
+// Order = the game's: patchstring, expansionstring, string (first table that has the key wins). Layout: 21-byte header (u16 crc, u16 count,
+// u32 hash size, u8 ver, u32 string start, u32 tries, u32 size), u16 index[count], then hash nodes of 17 bytes (u8 used, u16 idx, u32 hash,
+// u32 key offset, u32 value offset, u16 value length); offsets are from the start of the file.
+static uniq_t *g_tr; static int g_trn;
+static int parse_tbl_cb(const char *d, int len) {
+    if (len < 21) return -1;
+    unsigned cnt = *(const unsigned short *)(d + 2), hs = *(const unsigned *)(d + 4);
+    size_t nodes = 21 + (size_t)cnt * 2;
+    if (hs > 100000 || nodes + (size_t)hs * 17 > (size_t)len) return -1;
+    int n = 0;
+    for (unsigned i = 0; i < hs; i++) {
+        const unsigned char *nd = (const unsigned char *)d + nodes + (size_t)i * 17;
+        if (!nd[0]) continue;
+        unsigned ko = *(const unsigned *)(nd + 7), vo = *(const unsigned *)(nd + 11);
+        if (ko >= (unsigned)len || vo >= (unsigned)len) continue;
+        const char *key = d + ko, *val = d + vo;
+        if (!memchr(key, 0, len - ko) || !memchr(val, 0, len - vo)) continue;
+        for (int r = 0; r < g_trn; r++)
+            if (!g_tr[r].done && !_stricmp(g_tr[r].key, key)) {
+                g_tr[r].done = 1; n++;
+                if (*val) snprintf(g_tr[r].name, sizeof g_tr[r].name, "%s", val);
+            }
+    }
+    return n > 0 ? n : 0;
+}
+static void tbl_translate(uniq_t *arr, int n) {
+    static const char *const files[] = {"Data\\local\\lng\\eng\\patchstring.tbl", "Data\\local\\lng\\eng\\expansionstring.tbl", "Data\\local\\lng\\eng\\string.tbl"};
+    g_tr = arr; g_trn = n;
+    for (int r = 0; r < n; r++) { snprintf(arr[r].key, sizeof arr[r].key, "%s", arr[r].name); arr[r].done = 0; }
+    for (int f = 0; f < 3; f++) { int t = storm_read(files[f], parse_tbl_cb); logf_("%s: %d names translated", files[f], t); }
+}
 // Runtime index = row number NOT counting the "Expansion" divider (same rule as ItemTypes/MonStats in qol).
 static int list_load(const char *file, const char *codecol, uniq_t *arr, int max, int *count) {
     if (*count == -9) {
         g_pt = arr; g_pmax = max; g_codecol = codecol;
         int n = storm_read(file, parse_list_cb);
         *count = n > 0 ? n : -1;
+        if (n > 0) tbl_translate(arr, n);
         logf_("%s: %d rows", file, *count);
     }
     return *count > 0;
@@ -701,11 +761,12 @@ static int contains_ci(const char *hay, const char *needle) {
 }
 
 // ---- .storage ------------------------------------------------------------------------------------------------
-// Chat lines are cut at ~95 characters including the "[quartermaster] " prefix, so reports are wrapped at 74.
-#define LINEMAX 74
+// Chat lines are cut at ~95 characters including the "[Quartermaster] " prefix, so reports are wrapped at 74.
+#define LINEMAX 72                                                  // visible characters + 6 per number (colour codes)
+static size_t eff_len(const char *t) { size_t n = strlen(t); for (const char *c = t; *c; c++) if (*c == 1) n += 1; else if (*c >= '0' && *c <= '9' && (c == t || (!isalnum((unsigned char)c[-1]) && c[-1] != '#'))) n += 6; return n; }
 static void say_wrapped(const char *head, char *line, const char *piece) {         // appends piece to line, flushing a full line first
-    if (strcmp(line, head) && strlen(line) + strlen(piece) + 2 > LINEMAX) { say(L"[quartermaster] %hs", line); snprintf(line, 128, "%s", head); }
-    if (strcmp(line, head)) strcat(line, ", ");
+    if (strcmp(line, head) && eff_len(line) + eff_len(piece) + 2 > LINEMAX) { say(L"[Quartermaster] %hs", line); snprintf(line, 128, "%s", head); }
+    if (strcmp(line, head)) strcat(line, " ");
     strcat(line, piece);
 }
 static void plural(const char *w, char *out, size_t n) {
@@ -722,11 +783,11 @@ static int grade_rank(const char *label) {                                      
 static void cmd_storage(const char *what) {
     int want = 0;                                                                   // 0 summary, CAT_* for one type
     if (*what) {
-        if (!_stricmp(what, "rejuv") || !_stricmp(what, "potions") || !_stricmp(what, "rvs") || !_stricmp(what, "rvl")) want = CAT_REJUV;
+        if (!_stricmp(what, "rejuv") || !_stricmp(what, "potion") || !_stricmp(what, "potions") || !_stricmp(what, "rvs") || !_stricmp(what, "rvl")) want = CAT_REJUV;
         else if (!_stricmp(what, "gems") || !_stricmp(what, "gem")) want = CAT_GEMS;
         else if (!_stricmp(what, "runes") || !_stricmp(what, "rune")) want = CAT_RUNES;
         else if (!_stricmp(what, "essences") || !_stricmp(what, "essence")) want = CAT_ESS;
-        else { say(L"[quartermaster] usage: .storage [rejuv|gems|runes|essences]"); return; }
+        else { say(L"[Quartermaster] Usage: .storage [rejuv|gems|runes|essences]"); return; }
     }
     store_t st; store_load(&st);
     if ((!want || want != CAT_REJUV) && (g_st_gems || g_st_runes || g_st_ess)) misc_load();
@@ -734,39 +795,41 @@ static void cmd_storage(const char *what) {
     for (int i = 0; i < st.n; i++) { int kd = KIND_GEM; if (st.e[i].n > 0 && misc_find_code(st.e[i].code, &kd)) { if (kd == KIND_RUNE) runes += st.e[i].n; else if (kd == KIND_ESS) ess += st.e[i].n; else gems += st.e[i].n; } }
     int potions = st.halves / 2, small = st.halves % 2;
 
-    if (!want) {                                                                    // "Storage: 5 Potions, 12 Gems, 3 Runes" - only the non-zero types
+    if (!want) {                                                                    // "Storage: 5 potions, 12 gems, 3 runes" - only the non-zero types
         char line[128] = "";
-        if (g_st_rejuv) add_part(line, sizeof line, potions, "Potions");                     /* whole potions only, no halves */
-        if (g_st_gems) add_part(line, sizeof line, gems, "Gems");
-        if (g_st_runes) add_part(line, sizeof line, runes, "Runes");
-        if (g_st_ess) add_part(line, sizeof line, ess, "Essences");
-        if (line[0]) say(L"[quartermaster] Storage: %hs", line);
-        else if (cat_mask_enabled()) say(L"[quartermaster] Storage: empty");
-        else say(L"[quartermaster] every item type is switched off in quartermaster.ini");
+        if (g_st_rejuv) add_part_nf(line, sizeof line, potions, "Potions");                     /* whole potions only, no halves */
+        if (g_st_gems) add_part_nf(line, sizeof line, gems, "Gems");
+        if (g_st_runes) add_part_nf(line, sizeof line, runes, "Runes");
+        if (g_st_ess) add_part_nf(line, sizeof line, ess, "Essences");
+        if (line[0]) { say(L"[Quartermaster] You have the following items:"); say(L"[Quartermaster] %hs", line); }
+        else if (cat_mask_enabled()) say(L"[Quartermaster] I am holding nothing for you.");
+        else say(L"[Quartermaster] I am not storing anything.");
         return;
     }
     if (want == CAT_REJUV) {
-        if (potions && small) say(L"[quartermaster] Potions: %d full rejuvenation, 1 small", potions);
-        else if (potions) say(L"[quartermaster] Potions: %d full rejuvenation", potions);
-        else if (small) say(L"[quartermaster] Potions: 1 small rejuvenation");
-        else say(L"[quartermaster] no potions stored");
+        if (!potions && !small) { say(L"[Quartermaster] I have no potions for you."); return; }
+        say(L"[Quartermaster] You have the following potions:");
+        if (potions) say(L"[Quartermaster] Full Rejuvenation %d", potions);
+        if (small) say(L"[Quartermaster] Small Rejuvenation 1");
         return;
     }
     if (want == CAT_ESS) {
-        if (!ess) { say(L"[quartermaster] no essences stored"); return; }
-        char head[] = "Essences: ", line[128] = "Essences: ";
+        if (!ess) { say(L"[Quartermaster] I have no essences for you."); return; }
+        char head[] = "", line[128] = "";
+        say(L"[Quartermaster] You have the following essences:");
         for (int i = 0; i < g_ness; i++) {
             int c = store_get(&st, *(DWORD *)g_ess[i].code);
             if (c <= 0) continue;
             char sn[24], piece[48]; ess_short(&g_ess[i], sn, sizeof sn); snprintf(piece, sizeof piece, "%s %d", sn, c);
             say_wrapped(head, line, piece);
         }
-        if (strcmp(line, head)) say(L"[quartermaster] %hs", line);
+        if (line[0]) say(L"[Quartermaster] %hs", line);
         return;
     }
     if (want == CAT_GEMS) {                                                         // one line per gem family, best grade first
-        if (!gems) { say(L"[quartermaster] no gems stored"); return; }
+        if (!gems) { say(L"[Quartermaster] I have no gems for you."); return; }
         char done[16][5]; int ndone = 0;
+        say(L"[Quartermaster] You have the following gems:");
         for (int f = 0; f < g_ngems; f++) {
             int seen = 0;
             for (int d = 0; d < ndone; d++) if (!strcmp(done[d], g_gems[f].type)) seen = 1;
@@ -786,7 +849,9 @@ static void cmd_storage(const char *what) {
             for (int x = 0; x < n; x++) for (int y = x + 1; y < n; y++) if (rank[y] > rank[x]) { int t = rank[x]; rank[x] = rank[y]; rank[y] = t; t = cnt[x]; cnt[x] = cnt[y]; cnt[y] = t; t = idx[x]; idx[x] = idx[y]; idx[y] = t; }
             char fam[48], head[64], line[128];
             plural(base, fam, sizeof fam);
-            snprintf(head, sizeof head, "%s: ", fam);
+            const char *gc = "0";                                                   // gem colour: amethyst purple, diamond white, emerald green, ruby red, sapphire blue, topaz yellow, skull grey
+            switch (g_gems[f].type[3]) { case 'a': gc = ";"; break; case 'e': gc = "2"; break; case 'r': gc = "1"; break; case 's': gc = "3"; break; case 't': gc = "9"; break; case 'z': gc = "5"; break; }
+            snprintf(head, sizeof head, "\x01%s%s\x01" "0 - ", gc, fam);
             snprintf(line, sizeof line, "%s", head);
             for (int k = 0; k < n; k++) {
                 if (!cnt[k]) continue;
@@ -796,19 +861,22 @@ static void cmd_storage(const char *what) {
                 char piece[48]; snprintf(piece, sizeof piece, "%s %d", label, cnt[k]);
                 say_wrapped(head, line, piece);
             }
-            say(L"[quartermaster] %hs", line);
+            say(L"[Quartermaster] %hs", line);
         }
         return;
     }
-    if (!runes) { say(L"[quartermaster] no runes stored"); return; }                // runes: highest first, packed into lines
-    char head[] = "Runes: ", line[128] = "Runes: ";
-    for (int i = g_nrunes - 1; i >= 0; i--) {
+    if (!runes) { say(L"[Quartermaster] I have no runes for you."); return; }                // runes: highest first, packed into lines
+    char line[128] = ""; int nrow = 0;
+    say(L"[Quartermaster] You have the following runes:");
+    for (int i = 0; i < g_nrunes; i++) {
         int c = store_get(&st, *(DWORD *)g_runes[i].code);
         if (c <= 0) continue;
         char piece[48]; snprintf(piece, sizeof piece, "%s %d", g_runes[i].name, c);
-        say_wrapped(head, line, piece);
+        if (nrow == 5) { say(L"[Quartermaster] %hs", line); line[0] = 0; nrow = 0; }                 // 5 runes per line
+        if (line[0]) strcat(line, " ");
+        strcat(line, piece); nrow++;
     }
-    if (strcmp(line, head)) say(L"[quartermaster] %hs", line);
+    if (line[0]) say(L"[Quartermaster] %hs", line);
 }
 
 // Returns 1 if the typed line was one of our commands (it is then not sent to the server).
@@ -823,29 +891,29 @@ static int qm_command(const char *text) {
     if (text[i] && text[i] != ' ') return 0;                              // ".depositx" is not ours
     while (text[i] == ' ') i++;
     const char *args = text + i;
-    if (!strcmp(word, "find")) strcpy(word, "lookup");                   // aliases: .find = .lookup, .take = .withdraw
-    else if (!strcmp(word, "take")) strcpy(word, "withdraw");
+    if (!strcmp(word, "find")) strcpy(word, "lookup");                   // aliases: .find = .lookup, .withdraw = .take
+    else if (!strcmp(word, "take")) strcpy(word, "withdraw");   // internal name stays "withdraw"
     if (strcmp(word, "deposit") && strcmp(word, "withdraw") && strcmp(word, "storage") && strcmp(word, "spawn") && strcmp(word, "lookup") && strcmp(word, "scan")) return 0;
     logf_("command: .%s %s", word, args);
     if (!strcmp(word, "spawn") && !g_cheat_spawn) {                       // cheat, off unless the ini says otherwise
-        say(L"[quartermaster] .spawn is a cheat and is off (set spawn=1 under [cheats] in quartermaster.ini)");
+        say(L"[Quartermaster] Spawn is not allowed.");
         return 1;
     }
     if (!strcmp(word, "lookup")) {                                        // .lookup WORDS : list unique and set items whose name contains the words
-        if (!*args) say(L"[quartermaster] usage: .lookup WORDS   e.g. .lookup jordan");
+        if (!*args) say(L"[Quartermaster] Usage: .lookup WORDS   e.g. .lookup jordan");
         else {
             int ul = uniq_load(), sl = set_load(), hits = 0;
-            if (!ul && !sl) say(L"[quartermaster] UniqueItems.txt / SetItems.txt could not be read");
+            if (!ul && !sl) say(L"[Quartermaster] I could not read the unique and set lists.");
             for (int k = 0; k < 2; k++) {
                 const uniq_t *arr = k ? g_set : g_uniq; int cnt = k ? (sl ? g_set_n : 0) : (ul ? g_uniq_n : 0);
                 for (int u = 0; u < cnt; u++) {
                     if (!contains_ci(arr[u].name, args)) continue;
-                    if (hits < 5) say(L"[quartermaster] %hs  (%.4hs)  %hs #%d", arr[u].name, arr[u].code, k ? "set" : "unique", u);
+                    if (hits < 5) { int cl = 4; while (cl > 0 && arr[u].code[cl - 1] == ' ') cl--; say(L"[Quartermaster] %hs  (%.*hs)  %hs #%d", arr[u].name, cl, arr[u].code, k ? "set" : "unique", u); }
                     hits++;
                 }
             }
-            if (!hits && (ul || sl)) say(L"[quartermaster] no unique or set item matches '%.40hs'", args);
-            else if (hits > 5) say(L"[quartermaster] ...and %d more; narrow the search", hits - 5);
+            if (!hits && (ul || sl)) say(L"[Quartermaster] I know no unique or set item like '%.40hs'.", args);
+            else if (hits > 5) say(L"[Quartermaster] ...and %d more. Narrow the search.", hits - 5);
         }
     } else if (!strcmp(word, "spawn") && (!_strnicmp(args, "unique ", 7) || !_strnicmp(args, "u ", 2) || !_strnicmp(args, "set ", 4) || !_strnicmp(args, "s ", 2))) {
         int set = (args[0] == 's' || args[0] == 'S');                      // .spawn unique|u NAME | #INDEX   and   .spawn set|s NAME | #INDEX
@@ -853,7 +921,7 @@ static int qm_command(const char *text) {
         while (*name == ' ') name++;
         const uniq_t *arr = set ? g_set : g_uniq; int *cnt = set ? &g_set_n : &g_uniq_n;
         int found = -1, hits = 0, ok = set ? set_load() : uniq_load();
-        if (!ok) say(L"[quartermaster] %hs could not be read", set ? "SetItems.txt" : "UniqueItems.txt");
+        if (!ok) say(L"[Quartermaster] I could not read the %hs list.", set ? "set" : "unique");
         else if (*name == '#' || (*name >= '0' && *name <= '9')) { int u = atoi(name + (*name == '#')); if (u >= 0 && u < *cnt) found = u, hits = 1; }     // by index: #285 or 285
         else if (*name) {
             for (int u = 0; u < *cnt; u++) if (contains_ci(arr[u].name, name)) {
@@ -861,11 +929,11 @@ static int qm_command(const char *text) {
                 if (hits++ == 0) found = u;
             }
         }
-        if (ok && found < 0) say(L"[quartermaster] no %hs item matches '%.40hs' (try .lookup)", set ? "set" : "unique", name);
-        else if (ok && hits > 1) say(L"[quartermaster] %d items match '%.40hs'; use .lookup and spawn by #index", hits, name);
+        if (ok && found < 0) say(L"[Quartermaster] I know no %hs item like '%.40hs'. Try .lookup.", set ? "set" : "unique", name);
+        else if (ok && hits > 1) say(L"[Quartermaster] %d items match '%.40hs'. Use .lookup and spawn by #index.", hits, name);
         else if (ok) {
             logf_("spawn %s: '%s' code '%.4s' #%d", set ? "set" : "unique", arr[found].name, arr[found].code, found);
-            if (!send_cmd(set ? QM_CMD_SPAWN_SET : QM_CMD_SPAWN_UNIQUE, *(DWORD *)arr[found].code, 1, found)) say(L"[quartermaster] not ready (start or join a game first)");
+            if (!send_cmd(set ? QM_CMD_SPAWN_SET : QM_CMD_SPAWN_UNIQUE, *(DWORD *)arr[found].code, 1, found)) say(L"[Quartermaster] Not ready. Start or join a game first.");
         }
     } else if (!strcmp(word, "spawn")) {                                  // cheat: .spawn CODE [COUNT] drops the item beside you
         char code[5] = "    "; int k = 0;
@@ -876,20 +944,20 @@ static int qm_command(const char *text) {
         int count = *rest >= '0' && *rest <= '9' ? atoi(rest) : 1;
         if (count < 1) count = 1;
         if (count > 25) count = 25;
-        if (!k || k > 4) say(L"[quartermaster] usage: .spawn CODE [COUNT]   e.g. .spawn rvl 5");
-        else if (!send_cmd(QM_CMD_SPAWN, *(DWORD *)code, count, 0)) say(L"[quartermaster] not ready (start or join a game first)");
+        if (!k || k > 4) say(L"[Quartermaster] Usage: .spawn CODE [COUNT]   e.g. .spawn rvl 5");
+        else if (!send_cmd(QM_CMD_SPAWN, *(DWORD *)code, count, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
     } else if (!strcmp(word, "storage")) {                                // .storage [rejuv|gems|runes]
         cmd_storage(args);
     } else if (!strcmp(word, "scan")) {                                   // diagnostic: log every owned item's saved bytes
-        if (!send_cmd(QM_CMD_SCAN, 0, 0, 0)) say(L"[quartermaster] not ready (start or join a game first)");
+        if (!send_cmd(QM_CMD_SCAN, 0, 0, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
     } else if (!strcmp(word, "deposit")) {                                // .deposit [rejuv|gems|runes]
         int mask = CAT_REJUV | CAT_GEMS | CAT_RUNES | CAT_ESS;
         if (*args) {
-            if (!_stricmp(args, "rejuv") || !_stricmp(args, "rvs") || !_stricmp(args, "rvl")) mask = CAT_REJUV;
+            if (!_stricmp(args, "rejuv") || !_stricmp(args, "potion") || !_stricmp(args, "potions") || !_stricmp(args, "rvs") || !_stricmp(args, "rvl")) mask = CAT_REJUV;
             else if (!_stricmp(args, "gems") || !_stricmp(args, "gem")) mask = CAT_GEMS;
             else if (!_stricmp(args, "runes") || !_stricmp(args, "rune")) mask = CAT_RUNES;
             else if (!_stricmp(args, "essences") || !_stricmp(args, "essence")) mask = CAT_ESS;
-            else { say(L"[quartermaster] usage: .deposit [rejuv|gems|runes|essences]"); return 1; }
+            else { say(L"[Quartermaster] Usage: .deposit [rejuv|gems|runes|essences]"); return 1; }
         }
         do_deposit(mask);
     } else if (!strcmp(word, "withdraw")) {                               // .withdraw ITEM AMOUNT   (both required; there is no "all")
@@ -897,17 +965,17 @@ static int qm_command(const char *text) {
         while (e > args && e[-1] == ' ') e--;
         const char *q = e;
         while (q > args && q[-1] != ' ') q--;
-        if (q == args || !(*q >= '0' && *q <= '9')) { say(L"[quartermaster] usage: .withdraw ITEM AMOUNT   e.g. .withdraw rejuv 5   or   .withdraw r12 2"); return 1; }
+        if (q == args || !(*q >= '0' && *q <= '9')) { say(L"[Quartermaster] Usage: .take ITEM AMOUNT   e.g. .take rejuv 5   or   .take r12 2"); return 1; }
         int count = atoi(q);
         char item[48]; int il = (int)(q - args);
         while (il > 0 && args[il - 1] == ' ') il--;
         if (il > 47) il = 47;
         memcpy(item, args, (size_t)il); item[il] = 0;
-        if (count < 1) { say(L"[quartermaster] the amount must be at least 1"); return 1; }
+        if (count < 1) { say(L"[Quartermaster] The amount must be at least 1."); return 1; }
         if (count > 255) count = 255;
         DWORD code = 0; int found = 0;
-        if (!_stricmp(item, "rejuv") || !_stricmp(item, "rejuvenation") || !_stricmp(item, "rvl")) {
-            if (!g_st_rejuv) { say(L"[quartermaster] rejuvenation storage is switched off in quartermaster.ini"); return 1; }
+        if (!_stricmp(item, "rejuv") || !_stricmp(item, "rejuvenation") || !_stricmp(item, "potion") || !_stricmp(item, "potions") || !_stricmp(item, "rvl")) {
+            if (!g_st_rejuv) { say(L"[Quartermaster] Potion storage is not allowed."); return 1; }
             found = 1;
         } else if (misc_load()) {
             for (int k = 0; k < 3 && !found; k++) {                                  // gems, runes, essences
@@ -924,8 +992,8 @@ static int qm_command(const char *text) {
                 }
             }
         }
-        if (!found) { say(L"[quartermaster] unknown item '%.30hs' (a code like r12 or gsv, a name, rejuv, or an essence like terror; .storage shows what is stored)", item); return 1; }
-        if (!send_cmd(QM_CMD_TAKE, code, count, 0)) say(L"[quartermaster] not ready (start or join a game first)");
+        if (!found) { say(L"[Quartermaster] I don't know '%.30hs'. Try a code like r12, a name, or rejuv.", item); return 1; }
+        if (!send_cmd(QM_CMD_TAKE, code, count, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
     }
     return 1;
 }
@@ -1036,7 +1104,7 @@ static int load_config(void) {            // returns [quartermaster] enabled
                   "essences=1\r\n"
                   "; 1 = .deposit and the deposit key also take items from the stash (the inventory and Horadric Cube are always included), 0 = leave the stash alone\r\n"
                   "stash=0\r\n"
-                  "; 1 = .deposit, .withdraw and the deposit key only work while you are in a town, 0 = they work anywhere\r\n"
+                  "; 1 = .deposit, .take and the deposit key only work while you are in a town, 0 = they work anywhere\r\n"
                   "town_only=1\r\n"
                   "\r\n"
                   "[keys]\r\n"

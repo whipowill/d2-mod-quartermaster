@@ -9,7 +9,7 @@ Items marked **[confirmed]** were verified in the real game.
 - The user commits and pushes themselves. Do not commit unless asked. (This repo has no git yet; the user will `git init` it.)
 - Shipped names: `quartermaster.dll`, `quartermaster.ini`, `quartermaster.log`, storage file `quartermaster.txt`. Master switch `[quartermaster] enabled`, `logging=0|1` (default 0: no log file, no packet probing; switch it on to debug, e.g. to see the `town check:` and `deposit:` lines).
 - Never `IsBadReadPtr` in hooks (use VirtualQuery `readable()`). Never log empty recv polls. Never run game code from a non-game thread (queue it and let `h_recv` do it); item work runs on the server thread through the packet-table handler.
-- Keep the ini and the user-facing docs free of references to other game mods. Printed instructions use the canonical command names (`.lookup`, `.withdraw`).
+- Keep the ini and the user-facing docs free of references to other game mods. Printed instructions use the canonical command names (`.lookup`, `.take`).
 
 ## Build
 ```
@@ -21,8 +21,8 @@ Cannot run the game under wine here; test in the real game. Install by copying t
 | command | what it does |
 |---|---|
 | `.deposit [rejuv\|gems\|runes\|essences]` | inventory and cube items of that type (all enabled types if none given) -> storage file; the stash only when `[storage] stash=1` (default 0). The deposit key (default Insert) = `.deposit` with no argument |
-| `.withdraw ITEM AMOUNT` (alias `.take`) | ITEM = `rejuv`, an item code (`r12`, `gsv`), a name, or an essence (`burning`, `terror`); both arguments required, no "all"; up to 40 per command |
-| `.storage [rejuv\|gems\|runes\|essences]` | no argument: totals (`Storage: 5 Potions, 12 Gems, 3 Runes`; potions are whole potions, a leftover half is not shown); `gems`: one line per colour, best grade first; `runes`: highest rune first; `essences`: the four boss essences by short name (Burning, Festering, Twisted, Charged); `rejuv`: full and small counts |
+| `.take ITEM AMOUNT` (alias `.withdraw`) | ITEM = `rejuv`, an item code (`r12`, `gsv`), a name, or an essence (`burning`, `terror`); both arguments required, no "all"; up to 40 per command |
+| `.storage [rejuv\|gems\|runes\|essences]` | no argument: totals (`You have the following items:` then `Potions 5 Gems 12 Runes 3`; potions are whole potions, a leftover half is not shown); `gems`: one line per colour, best grade first; `runes`: lowest rune first, 5 per line; `essences`: the four boss essences by short name (Burning, Festering, Twisted, Charged); `rejuv`: full and small counts |
 | `.lookup WORDS` (alias `.find`) | finds unique and set items by name (code and #index) |
 | `.spawn CODE [N]`, `.spawn unique\|u NAME\|#N`, `.spawn set\|s NAME\|#N` | cheat, off unless `[cheats] spawn=1` |
 | `.scan` | diagnostic: logs every owned item's class, mode, guid and serialized bytes |
@@ -31,7 +31,7 @@ Cannot run the game under wine here; test in the real game. Install by copying t
 Rejuvenation is stored in halves (rvs = 1, rvl = 2); withdrawals hand out only full ones.
 
 ## Status
-- **[confirmed]** chat swallow/reply, `.spawn CODE`, `.deposit` and `.withdraw` for rejuvenation potions.
+- **[confirmed]** chat swallow/reply, `.spawn CODE`, `.deposit` and `.take` for rejuvenation potions.
 - **Built, untested:** forced uniques and sets, gems and runes, the per-type switches, the deposit key.
 - **Not done / ideas:** storing exact items via the game's serialization (NOTES.md section 8), deposit from the belt, putting the project under git.
 

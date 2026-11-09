@@ -10,7 +10,7 @@ Analysis helper: a few lines of pefile + capstone (`get_memory_mapped_image()`, 
   so a command must be swallowed in `h_send` (return the last real send result, send nothing) or it appears as chat. Only our own commands are swallowed; other `.xyz` lines pass through (another mod may consume its own commands earlier, at the D2Client chat-send call +0xB2342, found by the pattern `8A 44 24 71 8D 74 24 70 C6 84 24 72 01 00 00 00 E8 ?? ?? ?? ?? E9`).
 - Replies: PrintGameString, D2Client +0x75EB0, `void __stdcall(const wchar_t *, int color)`. It must run on the game thread, so messages go through a locked queue (`say`, producers = game thread and server thread) and `h_recv` (game thread, every frame) prints them. Gated on D2Client ts 1318970890.
 - Hooks: SendPacket inline detour (chained behind any other mod's hook, see section 10), ReceivePacket IAT hook on D2Client (found by signature, ordinals differ between builds). `g_arg` (SendPacket's 2nd argument) is learned from the game's own gameplay packets (id < 0x60).
-- Commands (canonical names; aliases in CLAUDE.md): `.deposit`, `.withdraw`, `.storage`, `.lookup`, `.scan`, and the cheat `.spawn`. Printed instructions always use the canonical names.
+- Commands (canonical names; aliases in CLAUDE.md): `.deposit`, `.take`, `.storage`, `.lookup`, `.scan`, and the cheat `.spawn`. Printed instructions always use the canonical names.
 
 ## 2. Running code on the SERVER thread without patching code  [confirmed]
 - Items belong to the server thread. The server dispatches client packets through a data table: D2Game 0x6fd1a698 (RVA 0xfa698), 8-byte `{handler, flag}` entries indexed by packet id, called as fastcall(ecx = game, edx = player, stack: buf, size), callee pops 8 (dispatcher 6fc873a0 rejects ids >= 0x67 and null handlers;
@@ -88,9 +88,9 @@ a mod of that kind is loaded, wait up to 30 s for its `E9` to appear and chain o
 so it cannot conflict with another mod's code patches. If another mod must load AFTER us, its inline hook needs the same `E9` tolerance.
 
 ## 11. Test status
-- **[confirmed]** chat swallow + reply; `.spawn CODE [N]`; `.deposit` and `.withdraw` for rejuvenation potions ("works as well as can be expected").
+- **[confirmed]** chat swallow + reply; `.spawn CODE [N]`; `.deposit` and `.take` for rejuvenation potions ("works as well as can be expected").
 - **Untested:** forced uniques/sets (`.lookup jordan`, `.spawn unique stone of jordan`, `.spawn set 80`: if the quality is wrong the `spawn unique:` / `spawn set:` log lines show the index, the table row and the resulting quality; the `creator hook:` lines show what was found at the creator);
-  gems and runes (`.deposit gems|runes`, the Insert key, `.storage`, `.withdraw r12 2`, `.withdraw perfect amethyst 1`, usage text when the amount is missing, a type switched off in the ini); the Misc.txt line `Misc.txt: N gem(s), N rune(s)` shows whether the lists loaded.
+  gems and runes (`.deposit gems|runes`, the Insert key, `.storage`, `.take r12 2`, `.take perfect amethyst 1`, usage text when the amount is missing, a type switched off in the ini); the Misc.txt line `Misc.txt: N gem(s), N rune(s)` shows whether the lists loaded.
 
 ## 12. Game facts this project depends on (stock LoD 1.13d)
 - Module timestamps: D2Game 1318970639 (0x4E9DE50F), D2Client 1318970890; every patch is gated on them. Preferred bases D2Game 0x6fc20000, D2Client 0x6fab0000, D2Net 0x6fbf0000 (D2Game was seen relocated to 0x02980000, so always use RVAs).

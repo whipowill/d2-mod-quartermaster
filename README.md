@@ -6,12 +6,21 @@ A mod for Diablo II that adds a chat command storage system.
 
 ## Features
 
-- ``.deposit`` - moves all storage items into the quartermaster bank
-- ``.withdraw <ITEMNAME> <AMOUNT>`` - retreive items from the quartermaster bank
+This mod is intended to make storing common items a lot easier: rejuvination potions, gems, runes, and essences.
+
+- ``.deposit`` - moves all storable items into the quartermaster bank
+- ``.take <NAME> <AMOUNT>`` - retreive items from the quartermaster bank
 - ``.storage`` - shows what is stored currently in the quartermaster bank
 - ``.storage potions|gems|runes|essences`` - shows what you have of that specific type
 
 The **Insert** key will perform the same action as the ``.deposit`` command.
+
+### Examples
+
+```
+.take rejuv 10
+.take shael 1
+```
 
 ### Cheats
 
