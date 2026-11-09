@@ -1,6 +1,6 @@
 # Will Scarlet's Quartermaster for Diablo II
 
-A mod for Diablo II that adds a chat command storage system. The idea is to interact with an NPC you just can't see.
+A mod for Diablo II that adds a chat command storage system. The idea is to interact with an NPC you just can't see, and his entire job is to store these items for you. Makes dumping inventory a lot quicker.
 
 **Note this was designed for D2LOD v1.13 and will not work on version 1.14.**
 
