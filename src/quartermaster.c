@@ -17,6 +17,7 @@ static int g_st_rejuv = 1, g_st_gems = 1, g_st_runes = 1, g_st_ess = 1;   // ini
 static int g_town_only = 1;                                // ini [storage] town_only: 1 = .deposit / .take / the deposit key only work in a town (default on)
 static int g_st_stash = 0;                                 // ini [storage] stash: 1 = deposit also takes items from the stash (default off)
 static int g_key_deposit = 0x2D;                           // ini [keys] deposit (default Insert, VK_INSERT); 0 = no key
+static int g_grail = 1;                                    // ini [grail] enabled: Holy Grail tracking
 static int g_cheat_spawn = 0;               // ini [cheats] spawn: .spawn / .spawn unique / .spawn set (default off)
 static int g_logging = 0;                 // ini [quartermaster] logging: 1 writes quartermaster.log (default off)
 static volatile LONG g_lines;
@@ -246,7 +247,7 @@ static int pick_pop(DWORD *guid) {
 #define D2GAME_TIMESTAMP_113D 1318970639u
 #define QM_PKT 0x2b
 #define QM_PKT_SIZE 9
-enum { QM_CMD_SCAN = 1, QM_CMD_SPAWN = 2, QM_CMD_SPAWN_UNIQUE = 3, QM_CMD_SPAWN_SET = 4, QM_CMD_DEPOSIT = 5, QM_CMD_TAKE = 6 };
+enum { QM_CMD_SCAN = 1, QM_CMD_SPAWN = 2, QM_CMD_SPAWN_UNIQUE = 3, QM_CMD_SPAWN_SET = 4, QM_CMD_DEPOSIT = 5, QM_CMD_TAKE = 6, QM_CMD_GRAIL = 7 };
 static DWORD g_dg;                                                        // D2Game base while loaded
 typedef DWORD (__stdcall *dg_fn1)(DWORD);
 typedef DWORD (__stdcall *dg_fn6)(DWORD, void *, DWORD, DWORD, DWORD, DWORD);
@@ -370,7 +371,7 @@ static void srv_spawn_special(DWORD game, DWORD player, DWORD code, int uidx, in
     DWORD it = call_spawn((DWORD)fn, code, player, game);
     g_ovr_on = 0;
     DWORD q = 0;
-    if (it && readable((void *)it, 0x20) && thunk_ok(0xa5e6)) q = ((dg_fn1)(g_dg + 0xa5e6))(it);        // D2Common: item quality
+    if (it && readable((void *)it, 0x20)) { DWORD d = *(DWORD *)(it + 0x14); if (readable((void *)d, 4)) q = *(DWORD *)d; }        // item data +0: quality (thunk 0xa5e6 is the item-text lookup, not quality)
     logf_("spawn %s: item=%lx quality=%lu", kind, (unsigned long)it, (unsigned long)q);
     say(it ? L"[Quartermaster] spawned %hs #%d (quality %lu)" : L"[Quartermaster] %hs #%d: nothing created", kind, uidx, (unsigned long)q);
 }
@@ -547,6 +548,70 @@ static void srv_take(DWORD game, DWORD player, DWORD code, int want) {
     else say(L"[Quartermaster] Took %d %hs(s).", made, nm);
 }
 
+// ---- Holy Grail, server side -------------------------------------------------------------------------------
+// The client asks every ~2 s (command 7). The server walks everything the player owns (stored, equipped, belt, cursor) and reports each IDENTIFIED unique,
+// set item it has not reported yet; the client thread does the file and the chat. Item data = unit +0x14, confirmed in D2Common:
+// +0x00 quality (5 set, 7 unique), +0x18 item flags (0x10 identified), +0x28 unique/set table index (an unidentified item already has it).
+// The index is checked against the game's runtime table (the row's base item must be the item's class), so a wrong offset can never record a wrong item.
+typedef struct { BYTE kind; WORD idx; char who[16]; } gfind_t;               // kind 0 unique, 1 set
+#define GRQ 128
+#define GRMAX 1024
+static gfind_t g_grq[GRQ]; static int g_gr_head, g_gr_tail;
+static BYTE g_gr_rep[2][GRMAX];                                              // server: already reported this run
+static int grq_push(const gfind_t *f) {
+    int ok = 0;
+    EnterCriticalSection(&g_cs);
+    int next = (g_gr_head + 1) % GRQ;
+    if (next != g_gr_tail) { g_grq[g_gr_head] = *f; g_gr_head = next; ok = 1; }
+    LeaveCriticalSection(&g_cs);
+    return ok;
+}
+static int grq_pop(gfind_t *f) {
+    int ok = 0;
+    EnterCriticalSection(&g_cs);
+    if (g_gr_tail != g_gr_head) { *f = g_grq[g_gr_tail]; g_gr_tail = (g_gr_tail + 1) % GRQ; ok = 1; }
+    LeaveCriticalSection(&g_cs);
+    return ok;
+}
+static void srv_grail(DWORD player, int rescan) {
+    if (!thunk_ok(0xa46c) || !thunk_ok(0xa60a) || !thunk_ok(0xa5f8)) return;
+    if (!readable((void *)player, 0x70) || *(DWORD *)player != 0) return;
+    DWORD inv = *(DWORD *)(player + 0x60);
+    if (!inv || !readable((void *)inv, 0x10)) return;
+    DWORD *gp = (DWORD *)(g_dg + (0x6fd18260 - 0x6fc20000));
+    if (!readable(gp, 4) || !readable((void *)*gp, 4)) return;
+    BYTE *root = (BYTE *)*(DWORD *)*gp;
+    if (!readable(root + 0xc20, 12)) return;
+    int ucount = *(int *)(root + 0xc28), scount = *(int *)(root + 0xc1c);
+    BYTE *utab = (BYTE *)*(DWORD *)(root + 0xc24), *stab = (BYTE *)*(DWORD *)(root + 0xc18);
+    char who[16] = "unknown";
+    DWORD pd = ((dg_fn1)(g_dg + 0xa5f8))(player);                             // player data: character name at +0
+    if (pd && readable((void *)pd, 16)) {
+        int k = 0;
+        for (; k < 15 && ((BYTE *)pd)[k] >= 0x20 && ((BYTE *)pd)[k] < 0x7f && ((BYTE *)pd)[k] != '|'; k++) who[k] = ((char *)pd)[k];
+        if (k) who[k] = 0;
+    }
+    static int bad;
+    int guard = 0;
+    if (rescan) memset(g_gr_rep, 0, sizeof g_gr_rep);                          // .grail scan: report everything again (the client skips what the file already has)
+    for (DWORD it = ((dg_fn1)(g_dg + 0xa46c))(inv); it && guard++ < 3000 && is_item(it); it = ((dg_fn1)(g_dg + 0xa60a))(it)) {
+        DWORD d = *(DWORD *)(it + 0x14);
+        if (!readable((void *)d, 0x40)) continue;
+        DWORD q = *(DWORD *)d, fl = *(DWORD *)(d + 0x18), idx = *(DWORD *)(d + 0x28), cls = *(DWORD *)(it + 4);
+        int kind;
+        if (q == 7) kind = 0; else if (q == 5) kind = 1; else continue;
+        if (!(fl & 0x10) || idx >= GRMAX || g_gr_rep[kind][idx]) continue;       // unidentified, or already reported
+        {
+            int cnt = kind ? scount : ucount; BYTE *tab = kind ? stab : utab; size_t stride = kind ? 0x1b8 : 0x14c;
+            if ((int)idx >= cnt || !readable(tab + (size_t)idx * stride, stride)) continue;
+            DWORD base = *(DWORD *)(tab + (size_t)idx * stride + 0x28);
+            if (base != cls) { if (bad++ < 5) logf_("grail: %s index %lu: table base item %lu but the item is class %lu - ignored", kind ? "set" : "unique", (unsigned long)idx, (unsigned long)base, (unsigned long)cls); continue; }
+        }
+        gfind_t f; f.kind = (BYTE)kind; f.idx = (WORD)idx; memcpy(f.who, who, 16); f.who[15] = 0;
+        if (grq_push(&f)) g_gr_rep[kind][idx] = 1;                                // queue full: try again next time
+    }
+}
+
 // The packet handler the server thread calls: fastcall(ecx = game, edx = player, buf, size); callee pops the two stack args.
 static int __attribute__((fastcall)) qm_srv(DWORD game, DWORD player, const BYTE *buf, int size) {
     if (size != QM_PKT_SIZE || !readable(buf, QM_PKT_SIZE) || buf[0] != QM_PKT || !g_dg) return 0;
@@ -557,6 +622,7 @@ static int __attribute__((fastcall)) qm_srv(DWORD game, DWORD player, const BYTE
         case QM_CMD_SPAWN_UNIQUE: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 0); break;
         case QM_CMD_DEPOSIT: srv_deposit(game, player, buf[6]); break;
         case QM_CMD_TAKE: srv_take(game, player, a, buf[6]); break;
+        case QM_CMD_GRAIL: if (g_grail) srv_grail(player, buf[6]); break;
         case QM_CMD_SPAWN_SET: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 1); break;
     }
     return 0;
@@ -674,31 +740,34 @@ static int parse_key(const char *v) {
 // ---- unique items by name (client side) ------------------------------------------------------------------
 // UniqueItems.txt is read through Storm like the game does. The unique's runtime index is its row number NOT counting the "Expansion"
 // divider (same rule as ItemTypes/MonStats in qol). Columns used: `index` (name key) and `code` (base item).
-typedef struct { char name[56]; char code[4]; char key[56]; char done; } uniq_t;   // name = what the game shows, key = the txt `index` string-table key
+typedef struct { char name[56]; char code[4]; char key[56]; char done; char off; } uniq_t;   // name = what the game shows, key = the txt `index` string-table key
 static uniq_t g_uniq[800], g_set[400]; static int g_uniq_n = -9, g_set_n = -9;     // -9 = not loaded yet, -1 = could not be read
-static uniq_t *g_pt; static int g_pmax; static const char *g_codecol;               // parser target (uniques: column `code`; sets: column `item`)
+static uniq_t *g_pt; static int g_pmax; static const char *g_codecol, *g_namecol, *g_encol;   // parser target (name column `index` or `Name`; code column `code`/`item`/`Rune1`; enabled column or NULL)
 static int parse_list_cb(const char *txt, int len) {
-    int col_idx = -1, col_code = -1, n = 0, header = 1, cl = (int)strlen(g_codecol);
+    int col_idx = -1, col_code = -1, col_en = -1, n = 0, header = 1, cl = (int)strlen(g_codecol), nl_ = (int)strlen(g_namecol), el = g_encol ? (int)strlen(g_encol) : 0;
     const char *p = txt, *end = txt + len;
     while (p < end) {
         const char *le = p; while (le < end && *le != '\n') le++;
         const char *ce = le; if (ce > p && ce[-1] == '\r') ce--;
         if (ce > p) {
-            char name[56] = "", code[8] = ""; int c = 0; const char *cs = p;
+            char name[56] = "", code[8] = "", en[8] = ""; int c = 0; const char *cs = p;
             for (const char *q = p; q <= ce; q++) {
                 if (q == ce || *q == '\t') {
                     int l = (int)(q - cs);
                     if (header) {
-                        if (l == 5 && !_strnicmp(cs, "index", 5)) col_idx = c;
+                        if (l == nl_ && !_strnicmp(cs, g_namecol, (size_t)nl_)) col_idx = c;
+                        else if (el && l == el && !_strnicmp(cs, g_encol, (size_t)el)) col_en = c;
                         else if (l == cl && !_strnicmp(cs, g_codecol, (size_t)cl)) col_code = c;
                     } else if (c == col_idx) snprintf(name, sizeof name, "%.*s", l, cs);
                     else if (c == col_code) snprintf(code, sizeof code, "%.*s", l, cs);
+                    else if (c == col_en) snprintf(en, sizeof en, "%.*s", l, cs);
                     c++; cs = q + 1;
                 }
             }
             if (header) { if (col_idx < 0 || col_code < 0) return -1; header = 0; }
             else if (_stricmp(name, "Expansion") && n < g_pmax) {            // the divider row has no runtime index
                 strcpy(g_pt[n].name, name);
+                g_pt[n].off = (char)(en[0] == '0');   // enabled=0: the game never makes it
                 memset(g_pt[n].code, ' ', 4);
                 for (int k = 0; k < 4 && code[k]; k++) g_pt[n].code[k] = code[k];
                 n++;
@@ -742,9 +811,9 @@ static void tbl_translate(uniq_t *arr, int n) {
     for (int f = 0; f < 3; f++) { int t = storm_read(files[f], parse_tbl_cb); logf_("%s: %d names translated", files[f], t); }
 }
 // Runtime index = row number NOT counting the "Expansion" divider (same rule as ItemTypes/MonStats in qol).
-static int list_load(const char *file, const char *codecol, uniq_t *arr, int max, int *count) {
+static int list_load(const char *file, const char *namecol, const char *codecol, const char *encol, uniq_t *arr, int max, int *count) {
     if (*count == -9) {
-        g_pt = arr; g_pmax = max; g_codecol = codecol;
+        g_pt = arr; g_pmax = max; g_codecol = codecol; g_namecol = namecol; g_encol = encol;
         int n = storm_read(file, parse_list_cb);
         *count = n > 0 ? n : -1;
         if (n > 0) tbl_translate(arr, n);
@@ -752,8 +821,8 @@ static int list_load(const char *file, const char *codecol, uniq_t *arr, int max
     }
     return *count > 0;
 }
-static int uniq_load(void) { return list_load("Data\\global\\excel\\UniqueItems.txt", "code", g_uniq, (int)(sizeof g_uniq / sizeof *g_uniq), &g_uniq_n); }
-static int set_load(void) { return list_load("Data\\global\\excel\\SetItems.txt", "item", g_set, (int)(sizeof g_set / sizeof *g_set), &g_set_n); }
+static int uniq_load(void) { return list_load("Data\\global\\excel\\UniqueItems.txt", "index", "code", "enabled", g_uniq, (int)(sizeof g_uniq / sizeof *g_uniq), &g_uniq_n); }
+static int set_load(void) { return list_load("Data\\global\\excel\\SetItems.txt", "index", "item", NULL, g_set, (int)(sizeof g_set / sizeof *g_set), &g_set_n); }
 static int contains_ci(const char *hay, const char *needle) {
     size_t nl = strlen(needle);
     for (; *hay; hay++) if (!_strnicmp(hay, needle, nl)) return 1;
@@ -879,6 +948,243 @@ static void cmd_storage(const char *what) {
     if (line[0]) say(L"[Quartermaster] %hs", line);
 }
 
+// ---- Holy Grail, client side --------------------------------------------------------------------------------
+// quartermaster_grail.txt (game folder, shared by every character) lists every enabled unique and set item read from the game's own
+// UniqueItems.txt / SetItems.txt / Runes.txt, so a mod's changes are followed. One line each:  kind|index|name|found on|found by   (the last two empty = not found yet).
+// Rows the game never makes (enabled=0 / complete=0) are left out. Written through a temp file; rewritten whole when something new is found.
+#define GRAIL_FILE "quartermaster_grail.txt"
+typedef struct { char when[20]; char who[16]; } gstat_t;
+static gstat_t g_gs[2][800]; static int g_gr_state;                           // 0 not loaded, 1 ready, -1 failed
+static const char *const g_gr_kind[3] = {"unique", "set"};
+static uniq_t *gr_arr(int k) { return k == 0 ? g_uniq : g_set; }
+static int gr_n(int k) {
+    int n = k == 0 ? g_uniq_n : g_set_n;
+    if (n > 800) n = 800;
+    return n > 0 ? n : 0;
+}
+static void gr_count(int k, int *found, int *total) {
+    *found = *total = 0;
+    const uniq_t *a = gr_arr(k);
+    for (int i = 0; i < gr_n(k); i++) if (!a[i].off) { (*total)++; if (g_gs[k][i].when[0]) (*found)++; }
+}
+static void pct_str(int f, int t, char *o) { int m = t ? (int)((long long)f * 1000 / t) : 0; sprintf(o, "%d.%d%%", m / 10, m % 10); }
+static int gr_save(void) {
+    FILE *f = fopen(GRAIL_FILE ".tmp", "w");
+    if (!f) return 0;
+    int tf = 0, tt = 0;
+    for (int k = 0; k < 2; k++) { int a, b; gr_count(k, &a, &b); tf += a; tt += b; }
+    char pc[16]; pct_str(tf, tt, pc);
+    fprintf(f, "# Quartermaster Holy Grail - every character shares this list.\n# Progress: %d of %d found (%s)\n# kind|index|name|found on|found by   (a line with a date and a character is found)\n", tf, tt, pc);
+    for (int k = 0; k < 2; k++) {
+        const uniq_t *a = gr_arr(k);
+        fprintf(f, "\n");
+        for (int i = 0; i < gr_n(k); i++) {
+            if (a[i].off && !g_gs[k][i].when[0]) continue;
+            fprintf(f, "%s|%d|%s|%s|%s\n", g_gr_kind[k], i, a[i].name, g_gs[k][i].when, g_gs[k][i].who);
+        }
+    }
+    if (fclose(f)) return 0;
+    return MoveFileExA(GRAIL_FILE ".tmp", GRAIL_FILE, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+}
+static int gr_init(void) {                                                    // loads the three lists and the file (once); creates the file when missing
+    if (g_gr_state) return g_gr_state > 0;
+    int ul = uniq_load(), sl = set_load();
+    if (!ul || !sl) { g_gr_state = -1; logf_("grail: the unique/set lists could not be read"); return 0; }
+    memset(g_gs, 0, sizeof g_gs);
+    int existed = 0;
+    FILE *f = fopen(GRAIL_FILE, "r");
+    if (f) {
+        existed = 1;
+        char l[256];
+        while (fgets(l, sizeof l, f)) {
+            if (l[0] == '#') continue;
+            char *fld[5]; int nf = 0; char *p = l;
+            fld[nf++] = p;
+            for (; *p && nf < 5; p++) if (*p == '|') { *p = 0; fld[nf++] = p + 1; }
+            if (nf < 5) continue;
+            for (p = fld[4]; *p; p++) if (*p == '\r' || *p == '\n') *p = 0;
+            int k = -1;
+            for (int i = 0; i < 2; i++) if (!strcmp(fld[0], g_gr_kind[i])) k = i;
+            int idx = atoi(fld[1]);
+            if (k < 0 || idx < 0 || idx >= gr_n(k) || !fld[3][0]) continue;
+            snprintf(g_gs[k][idx].when, sizeof g_gs[k][idx].when, "%s", fld[3]);
+            snprintf(g_gs[k][idx].who, sizeof g_gs[k][idx].who, "%s", fld[4]);
+        }
+        fclose(f);
+    }
+    g_gr_state = 1;
+    if (!existed) gr_save();
+    logf_("grail: ready (%d unique, %d set rows)", gr_n(0), gr_n(1));
+    return 1;
+}
+// ---- .grail scan: import from the save files ------------------------------------------------------------------
+// Reads Save\*.d2s (characters), Save\*.d2x (PlugY personal stash) and Save\*.sss (PlugY shared stash, softcore and hardcore alike). Every item in these files starts with
+// "JM" + 32 flag bits, and the unique/set index sits near the start of the record, so only the head of each item is read (no property parsing). Bits are LSB first:
+// flags 32 (0x10 identified, 0x10000 ear, 0x200000 simple, 0x800000 always set), version 10 (>= 100), location 3 + slot 4 + x 4 + y 4 + page 3, code 4x8, sockets 3, id 32, ilvl 7,
+// quality 4 (5 set, 7 unique), picture flag 1 (+3), class flag 1 (+11), set/unique index 12. Checked against 944 items of a real shared stash: every index matched the
+// table row's base item. A hit counts only if the item is identified, the index is in the game's list and the row's base item equals the item's code.
+static unsigned bits_get(const BYTE *b, size_t len, size_t *pos, int n) {
+    unsigned v = 0;
+    for (int i = 0; i < n; i++, (*pos)++) { size_t p = *pos; if ((p >> 3) < len) v |= (unsigned)((b[p >> 3] >> (p & 7)) & 1) << i; }
+    return v;
+}
+static gstat_t g_cand[2][800];                                                // earliest find per item during one scan
+static void scan_buffer(const BYTE *b, size_t len, const char *who, const char *when) {
+    for (size_t i = 0; i + 30 <= len; i++) {
+        if (b[i] != 'J' || b[i + 1] != 'M') continue;
+        size_t pos = (i + 2) * 8;
+        unsigned fl = bits_get(b, len, &pos, 32);
+        if (!(fl & 0x800000) || (fl & 0x10000) || (fl & 0x200000) || !(fl & 0x10)) continue;      // not a full, identified item
+        if (bits_get(b, len, &pos, 10) < 100) continue;
+        bits_get(b, len, &pos, 18);
+        char code[4];
+        for (int k = 0; k < 4; k++) { char c = (char)bits_get(b, len, &pos, 8); code[k] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+        if (!isalnum((unsigned char)code[0]) || !isalnum((unsigned char)code[1]) || !isalnum((unsigned char)code[2])) continue;
+        bits_get(b, len, &pos, 3); bits_get(b, len, &pos, 32); bits_get(b, len, &pos, 7);
+        unsigned q = bits_get(b, len, &pos, 4);
+        if (q != 5 && q != 7) continue;
+        if (bits_get(b, len, &pos, 1)) bits_get(b, len, &pos, 3);
+        if (bits_get(b, len, &pos, 1)) bits_get(b, len, &pos, 11);
+        int k = q == 7 ? 0 : 1, idx = (int)bits_get(b, len, &pos, 12);
+        if (idx >= gr_n(k) || gr_arr(k)[idx].off || memcmp(gr_arr(k)[idx].code, code, 4)) continue;
+        gstat_t *c = &g_cand[k][idx];
+        if (!c->when[0] || strcmp(when, c->when) < 0) { snprintf(c->when, sizeof c->when, "%s", when); snprintf(c->who, sizeof c->who, "%s", who); }
+    }
+}
+static int scan_saves(int *nfiles) {                                          // returns the number of new items recorded
+    memset(g_cand, 0, sizeof g_cand);
+    static const char *const pat[] = {"Save\\*.d2s", "Save\\*.d2x", "Save\\*.sss"};
+    *nfiles = 0;
+    for (int p = 0; p < 3; p++) {
+        WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pat[p], &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            char path[MAX_PATH]; snprintf(path, sizeof path, "Save\\%s", fd.cFileName);
+            FILE *f = fopen(path, "rb");
+            if (!f) continue;
+            fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+            BYTE *buf = (sz > 64 && sz < (8 << 20)) ? malloc((size_t)sz) : NULL;
+            if (buf && fread(buf, 1, (size_t)sz, f) != (size_t)sz) { free(buf); buf = NULL; }
+            fclose(f);
+            if (!buf) continue;
+            char who[16] = "", when[20] = "";
+            if (p == 2) snprintf(who, sizeof who, "%s", strstr(fd.cFileName, "HC") || strstr(fd.cFileName, "ardcore") ? "Shared Stash HC" : "Shared Stash");
+            else {
+                if (p == 0 && sz > 0x30 && *(DWORD *)buf == 0xaa55aa55u) { memcpy(who, buf + 20, 15); who[15] = 0; }
+                if (!who[0]) { snprintf(who, sizeof who, "%.*s", (int)(strchr(fd.cFileName, '.') ? strchr(fd.cFileName, '.') - fd.cFileName : 15), fd.cFileName); }
+                for (char *c = who; *c; c++) if (*c == '|' || (unsigned char)*c < 0x20) *c = '?';
+            }
+            FILETIME lt; SYSTEMTIME st; FileTimeToLocalFileTime(&fd.ftLastWriteTime, &lt); FileTimeToSystemTime(&lt, &st);
+            snprintf(when, sizeof when, "%04d-%02d-%02d %02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+            scan_buffer(buf, (size_t)sz, who, when);
+            free(buf); (*nfiles)++;
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    int added = 0;
+    for (int k = 0; k < 2; k++)
+        for (int i = 0; i < gr_n(k); i++)
+            if (g_cand[k][i].when[0] && !g_gs[k][i].when[0]) { g_gs[k][i] = g_cand[k][i]; added++; logf_("grail scan: %s #%d '%s' in %s", g_gr_kind[k], i, gr_arr(k)[i].name, g_cand[k][i].who); }
+    return added;
+}
+static int g_scan_pending, g_scan_added; static DWORD g_scan_until;           // .grail scan: live finds that arrive shortly after are added quietly, then one summary line
+static const char *gr_color(int k) { return k == 0 ? "4" : "2"; }      // unique gold, set green
+static void gr_progress(void) {
+    int f = 0, t = 0;
+    for (int k = 0; k < 2; k++) { int a, b; gr_count(k, &a, &b); f += a; t += b; }
+    char pc[16]; pct_str(f, t, pc);
+    say(L"[Quartermaster] You are %hs complete on your Holy Grail quest.", pc);
+}
+// .grail missing [unique|set] [N]: the first N items (default 5, at most 15) not found yet, in the game's list order.
+static void grail_missing(const char *a) {
+    int kmin = 0, kmax = 1, lim = 5;
+    while (*a) {
+        const char *e = a; while (*e && *e != ' ') e++;
+        char w[16]; snprintf(w, sizeof w, "%.*s", (int)(e - a) < 15 ? (int)(e - a) : 15, a);
+        if (!_stricmp(w, "unique") || !_stricmp(w, "uniques") || !_stricmp(w, "u")) kmin = kmax = 0;
+        else if (!_stricmp(w, "set") || !_stricmp(w, "sets") || !_stricmp(w, "s")) kmin = kmax = 1;
+        else if (w[0] >= '0' && w[0] <= '9') lim = atoi(w);
+        else { say(L"[Quartermaster] Usage: .grail missing [unique|set] [COUNT]"); return; }
+        a = e; while (*a == ' ') a++;
+    }
+    if (lim < 1) lim = 1;
+    if (lim > 15) lim = 15;
+    int shown = 0, more = 0;
+    for (int k = kmin; k <= kmax; k++) {
+        const uniq_t *arr = gr_arr(k);
+        for (int i = 0; i < gr_n(k); i++) {
+            if (arr[i].off || g_gs[k][i].when[0]) continue;
+            if (shown < lim) { say(L"[Quartermaster] \x01%hs%.50hs\x01" L"0 (%hs)", gr_color(k), arr[i].name, k ? "set" : "unique"); shown++; }
+            else more++;
+        }
+    }
+    if (!shown) say(L"[Quartermaster] Nothing missing here. Well done!");
+    else if (more) say(L"[Quartermaster] ...and %d more missing.", more);
+}
+static void cmd_grail(const char *args) {
+    if (!g_grail) { say(L"[Quartermaster] Holy Grail tracking is switched off."); return; }
+    int scan = !_stricmp(args, "scan"), miss = !_strnicmp(args, "missing", 7) && (!args[7] || args[7] == ' ');
+    int kind = !_stricmp(args, "unique") || !_stricmp(args, "uniques") || !_stricmp(args, "u") ? 0 : !_stricmp(args, "set") || !_stricmp(args, "sets") || !_stricmp(args, "s") ? 1 : -1;
+    if (*args && !scan && !miss && kind < 0) { say(L"[Quartermaster] Usage: .grail [unique|set|scan|missing]"); return; }
+    if (!gr_init()) { say(L"[Quartermaster] I could not read the unique and set lists."); return; }
+    if (miss) { const char *r = args + 7; while (*r == ' ') r++; grail_missing(r); return; }
+    if (scan) {                                                               // the save files now, the current character's items via the server
+        int nf, added = scan_saves(&nf);
+        if (!nf) logf_("grail scan: no save files found in Save\\");
+        g_scan_added = added; g_scan_pending = 1; g_scan_until = GetTickCount() + 1500;
+        send_cmd(QM_CMD_GRAIL, 0, 1, 0);                                       // the current character's items arrive within a moment
+        return;                                                                // the summary is printed by gr_pump
+    }
+    if (kind < 0) { gr_progress(); return; }                                  // plain .grail: the one line
+    int f, t; gr_count(kind, &f, &t);
+    char pc[16]; pct_str(f, t, pc);
+    say(L"[Quartermaster] You have found %d of %d %hs items (%hs).", f, t, kind ? "set" : "unique", pc);
+}
+static void gr_apply(const gfind_t *f, int n, int quiet) {
+    if (!gr_init()) return;
+    char now[20]; SYSTEMTIME t; GetLocalTime(&t);
+    snprintf(now, sizeof now, "%04d-%02d-%02d %02d:%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute);
+    int added = 0, lk[GRQ], li[GRQ];
+    for (int i = 0; i < n; i++) {
+        int k = f[i].kind, idx = f[i].idx;
+        if (k > 1 || idx >= gr_n(k) || gr_arr(k)[idx].off || g_gs[k][idx].when[0]) continue;
+        snprintf(g_gs[k][idx].when, sizeof g_gs[k][idx].when, "%s", now);
+        snprintf(g_gs[k][idx].who, sizeof g_gs[k][idx].who, "%s", f[i].who);
+        lk[added] = k; li[added++] = idx;
+        logf_("grail: new %s #%d '%s' by %s", g_gr_kind[k], idx, gr_arr(k)[idx].name, f[i].who);
+    }
+    if (!added) return;
+    if (!gr_save()) logf_("grail: could not write %s", GRAIL_FILE);
+    if (quiet) { g_scan_added += added; return; }
+    if (added <= 3) {
+        say(added == 1 ? L"[Quartermaster] Congratulations, you just discovered a new item for your Holy Grail quest!" : L"[Quartermaster] Congratulations, you just discovered new items for your Holy Grail quest!");
+        for (int i = 0; i < added; i++) say(L"[Quartermaster] \x01%hs%.50hs\x01" L"0", gr_color(lk[i]), gr_arr(lk[i])[li[i]].name);
+    } else say(L"[Quartermaster] Congratulations, you discovered %d new Holy Grail items!", added);
+    gr_progress();
+}
+static volatile LONG g_gr_req;                                                // set by h_recv when the server tells us an item moved
+static void gr_pump(void) {                                                   // game thread, every frame: apply what the server found; ask for a new look when an item moved
+    if (!g_grail || !p_print) return;
+    gfind_t f[32]; int n = 0;
+    while (n < 32 && grq_pop(&f[n])) n++;
+    if (n) gr_apply(f, n, g_scan_pending);
+    static DWORD last;
+    DWORD now = GetTickCount();
+    if (g_scan_pending && (int)(now - g_scan_until) >= 0) {                  // end of .grail scan: one summary
+        g_scan_pending = 0;
+        if (g_scan_added) { say(L"[Quartermaster] Added %d new item(s) to your Holy Grail.", g_scan_added); gr_save(); }
+        else say(L"[Quartermaster] No new items to add to your Holy Grail.");
+        gr_progress();
+    }
+    if (!g_gr_req || now - last < 1000) return;                               // only after an item moved (see h_recv), at most once a second
+    g_gr_req = 0; last = now;
+    if (g_arg < 0 || !g_srv_ready) return;
+    HMODULE cl = GetModuleHandleA("D2Client.dll");
+    if (!cl || !((DWORD (__stdcall *)(void))((BYTE *)cl + 0x613C0))()) return;      // not in a game
+    send_cmd(QM_CMD_GRAIL, 0, 0, 0);
+}
+
 // Returns 1 if the typed line was one of our commands (it is then not sent to the server).
 static int qm_command(const char *text) {
     int i = 0;
@@ -893,7 +1199,7 @@ static int qm_command(const char *text) {
     const char *args = text + i;
     if (!strcmp(word, "find")) strcpy(word, "lookup");                   // aliases: .find = .lookup, .withdraw = .take
     else if (!strcmp(word, "take")) strcpy(word, "withdraw");   // internal name stays "withdraw"
-    if (strcmp(word, "deposit") && strcmp(word, "withdraw") && strcmp(word, "storage") && strcmp(word, "spawn") && strcmp(word, "lookup") && strcmp(word, "scan")) return 0;
+    if (strcmp(word, "deposit") && strcmp(word, "withdraw") && strcmp(word, "storage") && strcmp(word, "spawn") && strcmp(word, "lookup") && strcmp(word, "scan") && strcmp(word, "grail")) return 0;
     logf_("command: .%s %s", word, args);
     if (!strcmp(word, "spawn") && !g_cheat_spawn) {                       // cheat, off unless the ini says otherwise
         say(L"[Quartermaster] Spawn is not allowed.");
@@ -946,6 +1252,8 @@ static int qm_command(const char *text) {
         if (count > 25) count = 25;
         if (!k || k > 4) say(L"[Quartermaster] Usage: .spawn CODE [COUNT]   e.g. .spawn rvl 5");
         else if (!send_cmd(QM_CMD_SPAWN, *(DWORD *)code, count, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
+    } else if (!strcmp(word, "grail")) {                                  // .grail : Holy Grail progress
+        cmd_grail(args);
     } else if (!strcmp(word, "storage")) {                                // .storage [rejuv|gems|runes]
         cmd_storage(args);
     } else if (!strcmp(word, "scan")) {                                   // diagnostic: log every owned item's saved bytes
@@ -1025,7 +1333,12 @@ static int __stdcall h_recv(void *buf, int cap) {
     int r = o_recv(buf, cap);
     say_flush();
     pick_pump();
+    gr_pump();
     if (InterlockedExchange(&g_key_req, 0)) do_deposit(CAT_REJUV | CAT_GEMS | CAT_RUNES | CAT_ESS);
+    if (g_grail && r > 1 && readable(buf, 2)) {                              // item action packets: 0x9d = items you own, 0x9c = world items (ignore ground add / drop / on-ground)
+        const unsigned char *b = buf;
+        if (b[0] == 0x9d || (b[0] == 0x9c && b[1] != 0 && b[1] != 2 && b[1] != 3)) g_gr_req = 1;
+    }
     if (g_logging && r > 0 && readable(buf, 1)) {
         static unsigned char seen[256];
         const unsigned char *b = buf;
@@ -1112,6 +1425,10 @@ static int load_config(void) {            // returns [quartermaster] enabled
                   "; PageDown, F1-F12, a letter or digit), a virtual-key number, or none\r\n"
                   "deposit=Insert\r\n"
                   "\r\n"
+                  "[grail]\r\n"
+                  "; Holy Grail tracker (quartermaster_grail.txt, shared by every character): 1 = track every unique and set item you find, 0 = off\r\n"
+                  "enabled=1\r\n"
+                  "\r\n"
                   "[cheats]\r\n"
                   "; 1 = allow .spawn CODE / .spawn unique NAME / .spawn set NAME (creates items out of nothing), 0 = off\r\n"
                   "spawn=0\r\n", f);
@@ -1120,6 +1437,7 @@ static int load_config(void) {            // returns [quartermaster] enabled
     }
     g_logging = GetPrivateProfileIntA("quartermaster", "logging", 0, path) != 0;
     g_cheat_spawn = GetPrivateProfileIntA("cheats", "spawn", 0, path) != 0;
+    g_grail = GetPrivateProfileIntA("grail", "enabled", 1, path) != 0;
     g_st_rejuv = GetPrivateProfileIntA("storage", "rejuv", 1, path) != 0;
     g_st_gems = GetPrivateProfileIntA("storage", "gems", 1, path) != 0;
     g_st_runes = GetPrivateProfileIntA("storage", "runes", 1, path) != 0;

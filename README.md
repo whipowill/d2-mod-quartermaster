@@ -17,9 +17,18 @@ This mod is intended to make storing common items a lot easier:
 - ``.deposit`` - moves all storable items into the quartermaster bank
 - ``.take <NAME> <AMOUNT>`` - retreive items from the quartermaster bank
 - ``.storage`` - shows what is stored currently in the quartermaster bank
-- ``.storage potions|gems|runes|essences`` - shows what you have in that category
+- ``.storage [potions|gems|runes|essences]`` - shows what you have in that category
 
 Pressing the ``Insert`` key will perform the same action as the ``.deposit`` command.
+
+### Holy Grail
+
+- ``.grail`` - shows your Holy Grail progress as a percentage
+- ``.grail unique`` / ``.grail set`` - progress for just uniques or just set items
+- ``.grail scan`` - imports finds from your saved characters and PlugY stashes
+- ``.grail missing [unique|set]`` - lists items you haven't found yet
+
+Progress is tracked in a ``quartermaster_grail.txt``  which you can delete to restart the quest.
 
 ### Examples
 
