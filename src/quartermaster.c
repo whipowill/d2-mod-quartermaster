@@ -1091,11 +1091,11 @@ static int scan_saves(int *nfiles) {                                          //
 }
 static int g_scan_pending, g_scan_added; static DWORD g_scan_until;           // .grail scan: live finds that arrive shortly after are added quietly, then one summary line
 static const char *gr_color(int k) { return k == 0 ? "4" : "2"; }      // unique gold, set green
-static void gr_progress(void) {
+static void gr_progress(int congrats) {
     int f = 0, t = 0;
     for (int k = 0; k < 2; k++) { int a, b; gr_count(k, &a, &b); f += a; t += b; }
     char pc[16]; pct_str(f, t, pc);
-    say(L"[Quartermaster] You are %hs complete on your Holy Grail quest.", pc);
+    say(congrats ? L"[Quartermaster] Congratulations! You are %hs complete on your Holy Grail quest." : L"[Quartermaster] You are %hs complete on your Holy Grail quest.", pc);
 }
 // .grail missing [unique|set] [N]: the first N items (default 5, at most 15) not found yet, in the game's list order.
 static void grail_missing(const char *a) {
@@ -1137,7 +1137,7 @@ static void cmd_grail(const char *args) {
         send_cmd(QM_CMD_GRAIL, 0, 1, 0);                                       // the current character's items arrive within a moment
         return;                                                                // the summary is printed by gr_pump
     }
-    if (kind < 0) { gr_progress(); return; }                                  // plain .grail: the one line
+    if (kind < 0) { gr_progress(0); return; }                                  // plain .grail: the one line
     int f, t; gr_count(kind, &f, &t);
     char pc[16]; pct_str(f, t, pc);
     say(L"[Quartermaster] You have found %d of %d %hs items (%hs).", f, t, kind ? "set" : "unique", pc);
@@ -1158,10 +1158,7 @@ static void gr_apply(const gfind_t *f, int n, int quiet) {
     if (!added) return;
     if (!gr_save()) logf_("grail: could not write %s", GRAIL_FILE);
     if (quiet) { g_scan_added += added; return; }
-    if (added <= 3) {
-        say(added == 1 ? L"[Quartermaster] Congratulations, you just discovered a new item for your Holy Grail quest!" : L"[Quartermaster] Congratulations, you just discovered new items for your Holy Grail quest!");
-    } else say(L"[Quartermaster] Congratulations, you discovered %d new Holy Grail items!", added);
-    gr_progress();
+    gr_progress(1);
 }
 static volatile LONG g_gr_req;                                                // set by h_recv when the server tells us an item moved
 static void gr_pump(void) {                                                   // game thread, every frame: apply what the server found; ask for a new look when an item moved
@@ -1175,7 +1172,7 @@ static void gr_pump(void) {                                                   //
         g_scan_pending = 0;
         if (g_scan_added) { say(L"[Quartermaster] Added %d new item(s) to your Holy Grail.", g_scan_added); gr_save(); }
         else say(L"[Quartermaster] No new items to add to your Holy Grail.");
-        gr_progress();
+        gr_progress(0);
     }
     if (!g_gr_req || now - last < 1000) return;                               // only after an item moved (see h_recv), at most once a second
     g_gr_req = 0; last = now;
