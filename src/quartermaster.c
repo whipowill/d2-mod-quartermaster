@@ -66,14 +66,23 @@ static print_t p_print;
 #define MSGQ 24
 static wchar_t g_msgq[MSGQ][96]; static int g_msg_head, g_msg_tail;
 static CRITICAL_SECTION g_cs;                                             // producers: the game thread (chat) and the SERVER thread (our packet handler); consumer: h_recv
+// A reply made while the SERVER thread is handling a player's command (deposit, take, spawn, grail, scan) goes back to THAT player, as a chat line from
+// "Quartermaster" sent through the game's own routine (srv_reply). Before, it was queued in the process that hosts the game and printed on the host's
+// screen, whoever had typed the command: a player who joined a TCP/IP game saw nothing (2026-11-13). Everything else (commands answered on the client:
+// .storage, .lookup ...) is queued and printed by the local client as before.
+static volatile DWORD g_srv_tid, g_reply_player;                         // the server thread's id and the player whose command it is running
+static int srv_reply(const wchar_t *msg);
 static void say(const wchar_t *fmt, ...) {
+    wchar_t buf[96];
+    va_list ap; va_start(ap, fmt);
+    vswprintf(buf, 96, fmt, ap);
+    va_end(ap);
+    buf[95] = 0;                                                        // a too-long line is cut, never unterminated
+    if (g_reply_player && g_srv_tid == GetCurrentThreadId() && srv_reply(buf)) return;
     EnterCriticalSection(&g_cs);
     int next = (g_msg_head + 1) % MSGQ;
     if (next != g_msg_tail) {                                             // full: drop
-        va_list ap; va_start(ap, fmt);
-        vswprintf(g_msgq[g_msg_head], 96, fmt, ap);
-        g_msgq[g_msg_head][95] = 0;                                    // a too-long line is cut, never unterminated
-        va_end(ap);
+        memcpy(g_msgq[g_msg_head], buf, sizeof buf);
         g_msg_head = next;
     }
     LeaveCriticalSection(&g_cs);
@@ -253,6 +262,32 @@ typedef DWORD (__stdcall *dg_fn1)(DWORD);
 typedef DWORD (__stdcall *dg_fn6)(DWORD, void *, DWORD, DWORD, DWORD, DWORD);
 
 static int thunk_ok(DWORD rva) { BYTE *p = (BYTE *)(g_dg + rva); return readable(p, 6) && p[0] == 0xFF && p[1] == 0x25; }   // D2Game's `jmp [IAT]` thunks into D2Common
+// The game's own "send this chat line to ONE client": D2Game 6fcfd190 (RVA 0xdd190), eax = a chat record, stack: the client; it builds the 0x26 packet
+// (type, flags, name, text) and sends it (6fcfb780). It is the same routine the chat handler uses to send a line to each player. Record: [0] 0x26, [1] type
+// (1 = chat), [3] 2, [9] flag byte (the real echo has 0x4d), name at +0xa (16 bytes), text at +0x1a; the text must be shorter than 256 bytes or the game exits.
+// The client is `playerdata(+0x9c)`; its name sits at client+0xd (the chat handler copies it from there).
+static int srv_reply(const wchar_t *msg) {
+    DWORD player = g_reply_player;
+    if (!player || !g_dg || !thunk_ok(0xa5f8)) return 0;
+    static const BYTE head[] = {0x81, 0xEC, 0x1C, 0x01, 0x00, 0x00, 0x56, 0x57, 0x8D, 0x78, 0x1A};             // sub esp,11c; push esi; push edi; lea edi,[eax+1a]
+    BYTE *fn = (BYTE *)(g_dg + 0xdd190);
+    if (!readable(fn, sizeof head) || memcmp(fn, head, sizeof head)) return 0;
+    DWORD pd = ((dg_fn1)(g_dg + 0xa5f8))(player);
+    if (!pd || !readable((void *)(pd + 0x9c), 4)) return 0;
+    DWORD client = *(DWORD *)(pd + 0x9c);
+    if (!client || !readable((void *)client, 0x20)) return 0;
+    if (!wcsncmp(msg, L"[Quartermaster] ", 16)) msg += 16;                                                    // the name goes in the record
+    wchar_t col[192];
+    colorize(msg, col, 192);
+    BYTE rec[0x140]; memset(rec, 0, sizeof rec);
+    rec[0] = 0x26; rec[1] = 1; rec[3] = 2; rec[9] = 0x4d;
+    memcpy(rec + 0xa, "Quartermaster", 14);
+    int n = 0;
+    for (const wchar_t *c = col; *c && n < 240; c++) rec[0x1a + n++] = *c < 256 ? (BYTE)*c : '?';              // Latin-1: U+00FF 'c' N is the game's colour code
+    BYTE *r = rec; DWORD cl = client;
+    __asm__ volatile("pushl %[c]\n\tcall *%[fn]\n\t" : "+a"(r) : [c] "r"(cl), [fn] "r"(fn) : "ecx", "edx", "memory", "cc");
+    return 1;
+}
 
 // Server-side: walk the player's inventory (every owned item: stored, equipped, belt, cursor) and log each item's game-serialized bytes.
 // Read-only. The thunks are D2Game's own stdcall jmp-thunks into D2Common (RVA 0xa46c first item of an inventory, 0xa60a next item,
@@ -617,6 +652,7 @@ static void srv_grail(DWORD player, int rescan) {
 static int __attribute__((fastcall)) qm_srv(DWORD game, DWORD player, const BYTE *buf, int size) {
     if (size != QM_PKT_SIZE || !readable(buf, QM_PKT_SIZE) || buf[0] != QM_PKT || !g_dg) return 0;
     DWORD a = *(const DWORD *)(buf + 2);
+    g_srv_tid = GetCurrentThreadId(); g_reply_player = player;                // say() now answers the player who sent this
     switch (buf[1]) {
         case QM_CMD_SCAN: srv_scan(player); break;
         case QM_CMD_SPAWN: if (g_cheat_spawn) srv_spawn(game, player, a, buf[6]); break;
@@ -626,6 +662,7 @@ static int __attribute__((fastcall)) qm_srv(DWORD game, DWORD player, const BYTE
         case QM_CMD_GRAIL: if (g_grail) srv_grail(player, buf[6]); break;
         case QM_CMD_SPAWN_SET: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 1); break;
     }
+    g_reply_player = 0;
     return 0;
 }
 
@@ -1186,7 +1223,7 @@ static void gr_pump(void) {                                                   //
 static int qm_command(const char *text) {
     int i = 0;
     while (text[i] == ' ') i++;
-    if (text[i] != '.') return 0;
+    if (text[i] != '.' && text[i] != '/') return 0;                       // ".deposit" or "/deposit"
     i++;
     char word[16]; int n = 0;
     while (text[i] && text[i] != ' ' && n < 15) { char c = text[i++]; word[n++] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
