@@ -17,7 +17,7 @@ This mod is intended to make storing common items a lot easier:
 - ``.deposit`` - moves all storable items into the quartermaster bank
 - ``.take <NAME> <AMOUNT>`` - retreive items from the quartermaster bank
 - ``.storage`` - shows what is stored currently in the quartermaster bank
-- ``.storage [potions|gems|runes|essences]`` - shows what you have in that category
+- ``.storage [potions|gems|runes|essences|keys|organs|shards]`` - shows what you have in that category
 
 Pressing the ``Insert`` key will perform the same action as the ``.deposit`` command.
 

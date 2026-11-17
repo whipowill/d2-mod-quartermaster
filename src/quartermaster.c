@@ -13,7 +13,7 @@
 #include "sig.h"
 
 static FILE *g_log;
-static int g_st_rejuv = 1, g_st_gems = 1, g_st_runes = 1, g_st_ess = 1;   // ini [storage] rejuv / gems / runes / essences: which item types the quartermaster keeps
+static int g_st_rejuv = 1, g_st_gems = 1, g_st_runes = 1, g_st_ess = 1, g_st_keys = 1, g_st_organs = 0, g_st_shards = 1;   // ini [storage] rejuv / gems / runes / essences: which item types the quartermaster keeps
 static int g_town_only = 1;                                // ini [storage] town_only: 1 = .deposit / .take / the deposit key only work in a town (default on)
 static int g_st_stash = 0;                                 // ini [storage] stash: 1 = deposit also takes items from the stash (default off)
 static int g_key_deposit = 0x2D;                           // ini [keys] deposit (default Insert, VK_INSERT); 0 = no key
@@ -162,11 +162,11 @@ static void store_add(store_t *st, DWORD code, int k) {
 // Gem and rune codes and names come from the game's own Misc.txt (type "rune"; types gema/gemd/geme/gemr/gems/gemt/gemz). Jewels are
 // not included (they carry properties). Loaded on the client thread before a command is sent; the server thread only reads them.
 typedef struct { char code[4]; char name[32]; char type[5]; } mitem_t;      // type = Misc.txt type (gem families gema/gemd/...; "rune")
-static mitem_t g_gems[64], g_runes[64], g_ess[16]; static int g_ngems, g_nrunes, g_ness, g_misc_state;      // state: 0 = not loaded, 1 = loaded, -1 = failed
+static mitem_t g_gems[64], g_runes[64], g_ess[16], g_keys[8], g_organs[8], g_shards[4]; static int g_ngems, g_nrunes, g_ness, g_nkeys, g_norgans, g_nshards, g_misc_state;      // state: 0 = not loaded, 1 = loaded, -1 = failed
 static int ci_has(const char *hay, const char *needle) { size_t nl = strlen(needle); for (; *hay; hay++) if (!_strnicmp(hay, needle, nl)) return 1; return 0; }
 static int parse_misc_cb(const char *txt, int len) {
     int c_name = -1, c_code = -1, c_type = -1, header = 1;
-    g_ngems = g_nrunes = g_ness = 0;
+    g_ngems = g_nrunes = g_ness = g_nkeys = g_norgans = g_nshards = 0;
     const char *p = txt, *end = txt + len;
     while (p < end) {
         const char *le = p; while (le < end && *le != '\n') le++;
@@ -192,6 +192,9 @@ static int parse_misc_cb(const char *txt, int len) {
                 if (!_stricmp(type, "rune") && g_nrunes < 64) m = &g_runes[g_nrunes++];
                 else if (!_strnicmp(type, "gem", 3) && strlen(type) == 4 && g_ngems < 64) m = &g_gems[g_ngems++];
                 else if (!_stricmp(type, "ques") && ci_has(name, "Essen") && g_ness < 16) m = &g_ess[g_ness++];      // the four boss essences (the table spells one "Essense")
+                else if (!_stricmp(type, "ques") && ci_has(name, "Pandemonium Key") && g_nkeys < 8) m = &g_keys[g_nkeys++];      // the three uber keys (pk1-pk3)
+                else if (!_stricmp(type, "ques") && (!_stricmp(code, "dhn") || !_stricmp(code, "bey") || !_stricmp(code, "mbr")) && g_norgans < 8) m = &g_organs[g_norgans++];      // Diablo's Horn, Baal's Eye, Mephisto's Brain
+                else if (!_stricmp(code, "wss") && g_nshards < 4) m = &g_shards[g_nshards++];      // Worldstone Shard (added by the user's Misc.txt)
                 if (m) {
                     memset(m->code, ' ', 4);
                     for (int k = 0; code[k]; k++) m->code[k] = (code[k] >= 'A' && code[k] <= 'Z') ? (char)(code[k] + 32) : code[k];
@@ -204,21 +207,24 @@ static int parse_misc_cb(const char *txt, int len) {
         }
         p = le + 1;
     }
-    return g_ngems + g_nrunes + g_ness;
+    return g_ngems + g_nrunes + g_ness + g_nkeys + g_norgans + g_nshards;
 }
 static int misc_load(void) {
     if (g_misc_state == 0) {
         int n = storm_read("Data\\global\\excel\\Misc.txt", parse_misc_cb);
         g_misc_state = n > 0 ? 1 : -1;
-        logf_("Misc.txt: %d gem(s), %d rune(s), %d essence(s)", g_ngems, g_nrunes, g_ness);
+        logf_("Misc.txt: %d gem(s), %d rune(s), %d essence(s), %d key(s), %d organ(s), %d shard(s)", g_ngems, g_nrunes, g_ness, g_nkeys, g_norgans, g_nshards);
     }
     return g_misc_state > 0;
 }
-enum { KIND_GEM = 0, KIND_RUNE = 1, KIND_ESS = 2 };
+enum { KIND_GEM = 0, KIND_RUNE = 1, KIND_ESS = 2, KIND_KEY = 3, KIND_ORGAN = 4, KIND_SHARD = 5 };
 static const mitem_t *misc_find_code(DWORD code, int *kind) {                      // kind (optional) = KIND_*
     for (int i = 0; i < g_ngems; i++) if (*(DWORD *)g_gems[i].code == code) { if (kind) *kind = KIND_GEM; return &g_gems[i]; }
     for (int i = 0; i < g_nrunes; i++) if (*(DWORD *)g_runes[i].code == code) { if (kind) *kind = KIND_RUNE; return &g_runes[i]; }
     for (int i = 0; i < g_ness; i++) if (*(DWORD *)g_ess[i].code == code) { if (kind) *kind = KIND_ESS; return &g_ess[i]; }
+    for (int i = 0; i < g_nkeys; i++) if (*(DWORD *)g_keys[i].code == code) { if (kind) *kind = KIND_KEY; return &g_keys[i]; }
+    for (int i = 0; i < g_norgans; i++) if (*(DWORD *)g_organs[i].code == code) { if (kind) *kind = KIND_ORGAN; return &g_organs[i]; }
+    for (int i = 0; i < g_nshards; i++) if (*(DWORD *)g_shards[i].code == code) { if (kind) *kind = KIND_SHARD; return &g_shards[i]; }
     return NULL;
 }
 static void ess_short(const mitem_t *m, char *out, size_t n) {                 // "Burning Essence of Terror" -> "Burning" (first word of the game's name)
@@ -226,7 +232,15 @@ static void ess_short(const mitem_t *m, char *out, size_t n) {                 /
     while (m->name[l] && m->name[l] != ' ' && l + 1 < n) { out[l] = m->name[l]; l++; }
     out[l] = 0;
 }
-static int kind_enabled(int kind) { return kind == KIND_RUNE ? g_st_runes : kind == KIND_ESS ? g_st_ess : g_st_gems; }
+static void key_short(const mitem_t *m, char *out, size_t n) {                 // "Pandemonium Key 1/2/3" -> "Terror" / "Hate" / "Destruction" (the game's names: Key of Terror, Hate, Destruction)
+    char d = m->name[strlen(m->name) - 1];
+    snprintf(out, n, "%s", d == '1' ? "Terror" : d == '2' ? "Hate" : d == '3' ? "Destruction" : "Key");
+}
+static void organ_short(const mitem_t *m, char *out, size_t n) {               // "Diablo's Horn" -> "Horn", "Baal's Eye" -> "Eye", "Mephisto's Brain" -> "Brain"
+    const char *sp = strrchr(m->name, ' ');
+    snprintf(out, n, "%s", sp ? sp + 1 : m->name);
+}
+static int kind_enabled(int kind) { return kind == KIND_RUNE ? g_st_runes : kind == KIND_ESS ? g_st_ess : kind == KIND_KEY ? g_st_keys : kind == KIND_ORGAN ? g_st_organs : kind == KIND_SHARD ? g_st_shards : g_st_gems; }
 
 // Ground items the server just created for a withdrawal; the client thread picks them up with the game's own 0x16 request (the same one a
 // click or qol's auto-pickup sends; potions go to the belt or inventory, anything that does not fit stays on the ground).
@@ -478,7 +492,10 @@ static void add_part(char *buf, size_t cap, int n, const char *what) { add_part_
 #define CAT_GEMS 2
 #define CAT_RUNES 4
 #define CAT_ESS 8
-static int cat_mask_enabled(void) { return (g_st_rejuv ? CAT_REJUV : 0) | (g_st_gems ? CAT_GEMS : 0) | (g_st_runes ? CAT_RUNES : 0) | (g_st_ess ? CAT_ESS : 0); }
+#define CAT_KEYS 16
+#define CAT_ORGANS 32
+#define CAT_SHARDS 64
+static int cat_mask_enabled(void) { return (g_st_rejuv ? CAT_REJUV : 0) | (g_st_gems ? CAT_GEMS : 0) | (g_st_runes ? CAT_RUNES : 0) | (g_st_ess ? CAT_ESS : 0) | (g_st_keys ? CAT_KEYS : 0) | (g_st_organs ? CAT_ORGANS : 0) | (g_st_shards ? CAT_SHARDS : 0); }
 
 // .deposit [rejuv|gems|runes]: every item in the inventory or the cube, plus the stash when [storage] stash=1 (never the belt, hands, equipment or sockets) of the chosen, enabled types
 // goes to the file. mask = CAT_* bits.
@@ -492,10 +509,13 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
     if (!mask) { say(L"[Quartermaster] That item type is not allowed."); return; }
     dg_fn1 cls_of = (dg_fn1)(g_dg + 0xa508);
     DWORD cs = cls_of(0x20737672), cl = cls_of(0x206c7672);                                      // "rvs ", "rvl "
-    DWORD gcls[64], rcls[64], ecls[16];
+    DWORD gcls[64], rcls[64], ecls[16], kcls[8], ocls[8], wcls[4];
     for (int i = 0; i < g_ngems; i++) gcls[i] = cls_of(*(DWORD *)g_gems[i].code);
     for (int i = 0; i < g_nrunes; i++) rcls[i] = cls_of(*(DWORD *)g_runes[i].code);
     for (int i = 0; i < g_ness; i++) ecls[i] = cls_of(*(DWORD *)g_ess[i].code);
+    for (int i = 0; i < g_nkeys; i++) kcls[i] = cls_of(*(DWORD *)g_keys[i].code);
+    for (int i = 0; i < g_norgans; i++) ocls[i] = cls_of(*(DWORD *)g_organs[i].code);
+    for (int i = 0; i < g_nshards; i++) wcls[i] = cls_of(*(DWORD *)g_shards[i].code);      // 0xFFFFFFFF when the game has no such item
     struct { DWORD item, code; int halves; } list[300]; int n = 0, guard = 0, skipped = 0;
     if (!thunk_ok(0xa59e)) { say(L"[Quartermaster] Deposit failed: unexpected game version."); return; }
     for (DWORD it = ((dg_fn1)(g_dg + 0xa46c))(inv); it && guard++ < 3000 && is_item(it); it = ((dg_fn1)(g_dg + 0xa60a))(it)) {
@@ -508,6 +528,9 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
         if (!match && (mask & CAT_GEMS)) for (int i = 0; i < g_ngems && !match; i++) if (gcls[i] == cls) { code = *(DWORD *)g_gems[i].code; match = 1; }
         if (!match && (mask & CAT_RUNES)) for (int i = 0; i < g_nrunes && !match; i++) if (rcls[i] == cls) { code = *(DWORD *)g_runes[i].code; match = 1; }
         if (!match && (mask & CAT_ESS)) for (int i = 0; i < g_ness && !match; i++) if (ecls[i] == cls) { code = *(DWORD *)g_ess[i].code; match = 1; }
+        if (!match && (mask & CAT_KEYS)) for (int i = 0; i < g_nkeys && !match; i++) if (kcls[i] == cls) { code = *(DWORD *)g_keys[i].code; match = 1; }
+        if (!match && (mask & CAT_ORGANS)) for (int i = 0; i < g_norgans && !match; i++) if (ocls[i] == cls) { code = *(DWORD *)g_organs[i].code; match = 1; }
+        if (!match && (mask & CAT_SHARDS)) for (int i = 0; i < g_nshards && !match; i++) if (wcls[i] == cls) { code = *(DWORD *)g_shards[i].code; match = 1; }
         if (!match) continue;
         DWORD page = ((dg_fn1)(g_dg + 0xa59e))(it) & 0xFF;                                      // which container grid holds it
         if (page != INV_PAGE && page != CUBE_PAGE && !(page == STASH_PAGE && g_st_stash)) {      // the stash (unless enabled) and anything else stays where it is
@@ -526,18 +549,18 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
     store_load(&before); after = before;
     for (int i = 0; i < n; i++) { if (list[i].code) store_add(&after, list[i].code, 1); else after.halves += list[i].halves; }
     if (!store_save(&after)) { logf_("deposit: could not write %s", STORE_FILE); say(L"[Quartermaster] I could not write the storage file. Nothing was deposited."); return; }
-    int done = 0, nr = 0, ng = 0, nu = 0, ne = 0; after = before;
+    int done = 0, nr = 0, ng = 0, nu = 0, ne = 0, nk = 0, no = 0, nw = 0; after = before;
     for (int i = 0; i < n; i++) {
         if (!destroy_item(game, player, list[i].item)) continue;
         done++;
-        if (list[i].code) { store_add(&after, list[i].code, 1); int kd = KIND_GEM; misc_find_code(list[i].code, &kd); if (kd == KIND_RUNE) nu++; else if (kd == KIND_ESS) ne++; else ng++; }
+        if (list[i].code) { store_add(&after, list[i].code, 1); int kd = KIND_GEM; misc_find_code(list[i].code, &kd); if (kd == KIND_RUNE) nu++; else if (kd == KIND_ESS) ne++; else if (kd == KIND_KEY) nk++; else if (kd == KIND_ORGAN) no++; else if (kd == KIND_SHARD) nw++; else ng++; }
         else { after.halves += list[i].halves; nr++; }
     }
     if (done != n) { logf_("deposit: only %d of %d items were destroyed; correcting the file", done, n); store_save(&after); }
-    logf_("deposit: %d item(s): %d rejuv, %d gem(s), %d rune(s), %d essence(s); rejuv halves %d -> %d", done, nr, ng, nu, ne, before.halves, after.halves);
+    logf_("deposit: %d item(s): %d rejuv, %d gem(s), %d rune(s), %d essence(s), %d key(s), %d organ(s), %d shard(s); rejuv halves %d -> %d", done, nr, ng, nu, ne, nk, no, nw, before.halves, after.halves);
     {   // the receipt lists only what was actually deposited
-        char rec[120] = "";
-        add_part(rec, sizeof rec, nr, "potion(s)"); add_part(rec, sizeof rec, ng, "gem(s)"); add_part(rec, sizeof rec, nu, "rune(s)"); add_part(rec, sizeof rec, ne, "essence(s)");
+        char rec[240] = "";
+        add_part(rec, sizeof rec, nr, "potion(s)"); add_part(rec, sizeof rec, ng, "gem(s)"); add_part(rec, sizeof rec, nu, "rune(s)"); add_part(rec, sizeof rec, ne, "essence(s)"); add_part(rec, sizeof rec, nk, "key(s)"); add_part(rec, sizeof rec, no, "organ(s)"); add_part(rec, sizeof rec, nw, "shard(s)");
         if (rec[0]) say(L"[Quartermaster] Deposited %hs.", rec); else say(L"[Quartermaster] nothing could be deposited");
     }
     if (skipped) say(L"[Quartermaster] I left %d item(s) in the stash alone.", skipped);
@@ -565,7 +588,9 @@ static void srv_take(DWORD game, DWORD player, DWORD code, int want) {
     char cc[5] = {(char)code, (char)(code >> 8), (char)(code >> 16), (char)(code >> 24), 0};
     char nmbuf[40];
     if (!rejuv && kd == KIND_ESS) { ess_short(mi, nmbuf, 24); strcat(nmbuf, " essence"); }      // "Burning essence"
-    const char *nm = rejuv ? "Full Rejuvenation Potion" : kd == KIND_ESS ? nmbuf : mi->name;
+    if (!rejuv && kd == KIND_KEY) { char ks[24]; key_short(mi, ks, sizeof ks); snprintf(nmbuf, sizeof nmbuf, "Key of %s", ks); }
+    if (!rejuv && kd == KIND_ORGAN) snprintf(nmbuf, sizeof nmbuf, "%s", mi->name);
+    const char *nm = rejuv ? "Full Rejuvenation Potion" : (kd == KIND_ESS || kd == KIND_KEY) ? nmbuf : mi->name;
     if (have < 1) { say(L"[Quartermaster] I hold no %hs for you.", nm); return; }
     int n = want < 1 ? 1 : want;
     if (n > have) n = have;
@@ -735,7 +760,7 @@ static void pick_pump(void) {
 static void do_deposit(int mask) {
     mask &= cat_mask_enabled();
     if (!mask) { say(L"[Quartermaster] That item type is not allowed."); return; }
-    if ((mask & (CAT_GEMS | CAT_RUNES | CAT_ESS)) && !misc_load()) mask &= CAT_REJUV;                  // Misc.txt unreadable: rejuvenation potions only
+    if ((mask & (CAT_GEMS | CAT_RUNES | CAT_ESS | CAT_KEYS | CAT_ORGANS | CAT_SHARDS)) && !misc_load()) mask &= CAT_REJUV;                  // Misc.txt unreadable: rejuvenation potions only
     if (!mask) { say(L"[Quartermaster] I could not read the item list."); return; }
     if (!send_cmd(QM_CMD_DEPOSIT, 0, mask, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
 }
@@ -894,12 +919,15 @@ static void cmd_storage(const char *what) {
         else if (!_stricmp(what, "gems") || !_stricmp(what, "gem")) want = CAT_GEMS;
         else if (!_stricmp(what, "runes") || !_stricmp(what, "rune")) want = CAT_RUNES;
         else if (!_stricmp(what, "essences") || !_stricmp(what, "essence")) want = CAT_ESS;
-        else { say(L"[Quartermaster] Usage: .storage [rejuv|gems|runes|essences]"); return; }
+        else if (!_stricmp(what, "keys") || !_stricmp(what, "key")) want = CAT_KEYS;
+        else if (!_stricmp(what, "organs") || !_stricmp(what, "organ")) want = CAT_ORGANS;
+        else if (!_stricmp(what, "shards") || !_stricmp(what, "shard")) want = CAT_SHARDS;
+        else { say(L"[Quartermaster] Usage: .storage [rejuv|gems|runes|essences|keys|organs|shards]"); return; }
     }
     store_t st; store_load(&st);
-    if ((!want || want != CAT_REJUV) && (g_st_gems || g_st_runes || g_st_ess)) misc_load();
-    int gems = 0, runes = 0, ess = 0;
-    for (int i = 0; i < st.n; i++) { int kd = KIND_GEM; if (st.e[i].n > 0 && misc_find_code(st.e[i].code, &kd)) { if (kd == KIND_RUNE) runes += st.e[i].n; else if (kd == KIND_ESS) ess += st.e[i].n; else gems += st.e[i].n; } }
+    if ((!want || want != CAT_REJUV) && (g_st_gems || g_st_runes || g_st_ess || g_st_keys || g_st_organs || g_st_shards)) misc_load();
+    int gems = 0, runes = 0, ess = 0, keys = 0, organs = 0, shards = 0;
+    for (int i = 0; i < st.n; i++) { int kd = KIND_GEM; if (st.e[i].n > 0 && misc_find_code(st.e[i].code, &kd)) { if (kd == KIND_RUNE) runes += st.e[i].n; else if (kd == KIND_ESS) ess += st.e[i].n; else if (kd == KIND_KEY) keys += st.e[i].n; else if (kd == KIND_ORGAN) organs += st.e[i].n; else if (kd == KIND_SHARD) shards += st.e[i].n; else gems += st.e[i].n; } }
     int potions = st.halves / 2, small = st.halves % 2;
 
     if (!want) {                                                                    // "Storage: 5 potions, 12 gems, 3 runes" - only the non-zero types
@@ -908,6 +936,9 @@ static void cmd_storage(const char *what) {
         if (g_st_gems) add_part_nf(line, sizeof line, gems, "Gems");
         if (g_st_runes) add_part_nf(line, sizeof line, runes, "Runes");
         if (g_st_ess) add_part_nf(line, sizeof line, ess, "Essences");
+        if (g_st_keys) add_part_nf(line, sizeof line, keys, "Keys");
+        if (g_st_organs) add_part_nf(line, sizeof line, organs, "Organs");
+        if (g_st_shards) add_part_nf(line, sizeof line, shards, "Shards");
         if (line[0]) { say(L"[Quartermaster] You have the following items:"); say(L"[Quartermaster] %hs", line); }
         else if (cat_mask_enabled()) say(L"[Quartermaster] I am holding nothing for you.");
         else say(L"[Quartermaster] I am not storing anything.");
@@ -931,6 +962,38 @@ static void cmd_storage(const char *what) {
             say_wrapped(head, line, piece);
         }
         if (line[0]) say(L"[Quartermaster] %hs", line);
+        return;
+    }
+    if (want == CAT_KEYS) {
+        if (!keys) { say(L"[Quartermaster] I have no keys for you."); return; }
+        char head[] = "", line[128] = "";
+        say(L"[Quartermaster] You have the following keys:");
+        for (int i = 0; i < g_nkeys; i++) {
+            int c = store_get(&st, *(DWORD *)g_keys[i].code);
+            if (c <= 0) continue;
+            char sn[24], piece[48]; key_short(&g_keys[i], sn, sizeof sn); snprintf(piece, sizeof piece, "%s %d", sn, c);
+            say_wrapped(head, line, piece);
+        }
+        if (line[0]) say(L"[Quartermaster] %hs", line);
+        return;
+    }
+    if (want == CAT_ORGANS) {
+        if (!organs) { say(L"[Quartermaster] I have no organs for you."); return; }
+        char head[] = "", line[128] = "";
+        say(L"[Quartermaster] You have the following organs:");
+        for (int i = 0; i < g_norgans; i++) {
+            int c = store_get(&st, *(DWORD *)g_organs[i].code);
+            if (c <= 0) continue;
+            char sn[24], piece[48]; organ_short(&g_organs[i], sn, sizeof sn); snprintf(piece, sizeof piece, "%s %d", sn, c);
+            say_wrapped(head, line, piece);
+        }
+        if (line[0]) say(L"[Quartermaster] %hs", line);
+        return;
+    }
+    if (want == CAT_SHARDS) {
+        if (!shards) { say(L"[Quartermaster] I have no shards for you."); return; }
+        say(L"[Quartermaster] You have the following shards:");
+        say(L"[Quartermaster] Worldstone Shard %d", shards);
         return;
     }
     if (want == CAT_GEMS) {                                                         // one line per gem family, best grade first
@@ -1293,13 +1356,16 @@ static int qm_command(const char *text) {
     } else if (!strcmp(word, "scan")) {                                   // diagnostic: log every owned item's saved bytes
         if (!send_cmd(QM_CMD_SCAN, 0, 0, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
     } else if (!strcmp(word, "deposit")) {                                // .deposit [rejuv|gems|runes]
-        int mask = CAT_REJUV | CAT_GEMS | CAT_RUNES | CAT_ESS;
+        int mask = CAT_REJUV | CAT_GEMS | CAT_RUNES | CAT_ESS | CAT_KEYS | CAT_ORGANS | CAT_SHARDS;
         if (*args) {
             if (!_stricmp(args, "rejuv") || !_stricmp(args, "potion") || !_stricmp(args, "potions") || !_stricmp(args, "rvs") || !_stricmp(args, "rvl")) mask = CAT_REJUV;
             else if (!_stricmp(args, "gems") || !_stricmp(args, "gem")) mask = CAT_GEMS;
             else if (!_stricmp(args, "runes") || !_stricmp(args, "rune")) mask = CAT_RUNES;
             else if (!_stricmp(args, "essences") || !_stricmp(args, "essence")) mask = CAT_ESS;
-            else { say(L"[Quartermaster] Usage: .deposit [rejuv|gems|runes|essences]"); return 1; }
+            else if (!_stricmp(args, "keys") || !_stricmp(args, "key")) mask = CAT_KEYS;
+            else if (!_stricmp(args, "organs") || !_stricmp(args, "organ")) mask = CAT_ORGANS;
+            else if (!_stricmp(args, "shards") || !_stricmp(args, "shard")) mask = CAT_SHARDS;
+            else { say(L"[Quartermaster] Usage: .deposit [rejuv|gems|runes|essences|keys|organs|shards]"); return 1; }
         }
         do_deposit(mask);
     } else if (!strcmp(word, "withdraw")) {                               // .withdraw ITEM AMOUNT   (both required; there is no "all")
@@ -1320,8 +1386,8 @@ static int qm_command(const char *text) {
             if (!g_st_rejuv) { say(L"[Quartermaster] Potion storage is not allowed."); return 1; }
             found = 1;
         } else if (misc_load()) {
-            for (int k = 0; k < 3 && !found; k++) {                                  // gems, runes, essences
-                const mitem_t *arr = k == 1 ? g_runes : k == 2 ? g_ess : g_gems; int cnt = k == 1 ? g_nrunes : k == 2 ? g_ness : g_ngems;
+            for (int k = 0; k < 6 && !found; k++) {                                  // gems, runes, essences, keys, organs, shards
+                const mitem_t *arr = k == 1 ? g_runes : k == 2 ? g_ess : k == 3 ? g_keys : k == 4 ? g_organs : k == 5 ? g_shards : g_gems; int cnt = k == 1 ? g_nrunes : k == 2 ? g_ness : k == 3 ? g_nkeys : k == 4 ? g_norgans : k == 5 ? g_nshards : g_ngems;
                 if (!kind_enabled(k)) continue;
                 for (int i = 0; i < cnt && !found; i++) {
                     char full[64]; snprintf(full, sizeof full, "%s Rune", arr[i].name);
@@ -1330,6 +1396,15 @@ static int qm_command(const char *text) {
                     int hit = !_stricmp(item, cc) || !_stricmp(item, arr[i].name) || (k == 1 && !_stricmp(item, full));
                     if (k == 2) { char sn[24]; ess_short(&arr[i], sn, sizeof sn); if (!_stricmp(item, sn)) hit = 1; }
                     if (k == 2 && of && (!_stricmp(item, of + 4) || (es && !_stricmp(item, es)))) hit = 1;
+                    if (k == 3) {                                                                                   // "terror", "key of terror", "key 1", "pandemonium key 1"
+                        char sn[24], al[48]; key_short(&arr[i], sn, sizeof sn);
+                        snprintf(al, sizeof al, "Key of %s", sn);
+                        char d[8]; snprintf(d, sizeof d, "%c", arr[i].name[strlen(arr[i].name) - 1]);
+                        char al2[16]; snprintf(al2, sizeof al2, "Key %s", d);
+                        if (!_stricmp(item, sn) || !_stricmp(item, al) || !_stricmp(item, al2)) hit = 1;
+                    }
+                    if (k == 4) { char sn[24]; organ_short(&arr[i], sn, sizeof sn); if (!_stricmp(item, sn)) hit = 1; }          // "horn", "eye", "brain"
+                    if (k == 5 && (!_stricmp(item, "shard") || !_stricmp(item, "shards") || !_stricmp(item, "world stone") || !_stricmp(item, "worldstone"))) hit = 1;      // shorthand
                     if (hit) { code = *(DWORD *)arr[i].code; found = 1; }
                 }
             }
@@ -1368,7 +1443,7 @@ static int __stdcall h_recv(void *buf, int cap) {
     say_flush();
     pick_pump();
     gr_pump();
-    if (InterlockedExchange(&g_key_req, 0)) do_deposit(CAT_REJUV | CAT_GEMS | CAT_RUNES | CAT_ESS);
+    if (InterlockedExchange(&g_key_req, 0)) do_deposit(CAT_REJUV | CAT_GEMS | CAT_RUNES | CAT_ESS | CAT_KEYS | CAT_ORGANS | CAT_SHARDS);
     if (g_grail && r > 1 && readable(buf, 2)) {                              // item action packets: 0x9d = items you own, 0x9c = world items (ignore ground add / drop / on-ground)
         const unsigned char *b = buf;
         if (b[0] == 0x9d || (b[0] == 0x9c && b[1] != 0 && b[1] != 2 && b[1] != 3)) g_gr_req = 1;
@@ -1444,11 +1519,14 @@ static int load_config(void) {            // returns [quartermaster] enabled
                   "logging=0\r\n"
                   "\r\n"
                   "[storage]\r\n"
-                  "; which item types the quartermaster keeps (1 = on, 0 = off): rejuvenation potions, gems, runes, essences\r\n"
+                  "; which item types the quartermaster keeps (1 = on, 0 = off): rejuvenation potions, gems, runes, essences, keys (the three Pandemonium keys), organs (Diablo's Horn, Baal's Eye, Mephisto's Brain; off by default), shards (Worldstone Shard)\r\n"
                   "rejuv=1\r\n"
                   "gems=1\r\n"
                   "runes=1\r\n"
                   "essences=1\r\n"
+                  "keys=1\r\n"
+                  "organs=0\r\n"
+                  "shards=1\r\n"
                   "; 1 = .deposit and the deposit key also take items from the stash (the inventory and Horadric Cube are always included), 0 = leave the stash alone\r\n"
                   "stash=0\r\n"
                   "; 1 = .deposit, .take and the deposit key only work while you are in a town, 0 = they work anywhere\r\n"
@@ -1476,6 +1554,9 @@ static int load_config(void) {            // returns [quartermaster] enabled
     g_st_gems = GetPrivateProfileIntA("storage", "gems", 1, path) != 0;
     g_st_runes = GetPrivateProfileIntA("storage", "runes", 1, path) != 0;
     g_st_ess = GetPrivateProfileIntA("storage", "essences", 1, path) != 0;
+    g_st_keys = GetPrivateProfileIntA("storage", "keys", 1, path) != 0;
+    g_st_organs = GetPrivateProfileIntA("storage", "organs", 0, path) != 0;
+    g_st_shards = GetPrivateProfileIntA("storage", "shards", 1, path) != 0;
     g_st_stash = GetPrivateProfileIntA("storage", "stash", 0, path) != 0;
     g_town_only = GetPrivateProfileIntA("storage", "town_only", 1, path) != 0;
     { char kb[32]; GetPrivateProfileStringA("keys", "deposit", "Insert", kb, sizeof kb, path); g_key_deposit = parse_key(kb); }
@@ -1520,7 +1601,7 @@ static DWORD WINAPI worker(LPVOID arg) {
     logf_("hook recv (IAT D2Client->D2Net#%u): %d", recv_ord, hook_import_ordinal(client, "D2Net.dll", recv_ord, h_recv, (void **)&o_recv));
     CreateThread(NULL, 0, patch_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, key_thread, NULL, 0, NULL);
-    logf_("storage: rejuv=%d gems=%d runes=%d essences=%d stash=%d town_only=%d, deposit key=%d", g_st_rejuv, g_st_gems, g_st_runes, g_st_ess, g_st_stash, g_town_only, g_key_deposit);
+    logf_("storage: rejuv=%d gems=%d runes=%d essences=%d keys=%d organs=%d shards=%d stash=%d town_only=%d, deposit key=%d", g_st_rejuv, g_st_gems, g_st_runes, g_st_ess, g_st_keys, g_st_organs, g_st_shards, g_st_stash, g_town_only, g_key_deposit);
     return 0;
 }
 
