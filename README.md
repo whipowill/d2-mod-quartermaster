@@ -12,7 +12,7 @@ A mod for Diablo II that adds a chat command storage system. The idea is to inte
 
 ## Features
 
-- **Virtual Bank** - enter a command to send common items to an account-wide virtual bank
+- **Reagents Bank** - enter a command to send common items to a chat-based storage system
 - **PlugY Organizer** - enter a command to instantly organize all your gear in the shared stash
 - **Holy Grail** - track your progress as you discover new items on your Holy Grail quest
 
