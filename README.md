@@ -45,7 +45,7 @@ The mod is forgiving on the shorthand names you can pass:
 
 The shared stash auto-organizer is controlled by a [configuration file](build/quartermaster_organize.cfg) designed around an [organization concept](ORGANIZATION.md).
 
-- ``.organize`` - will take gear on the current page and organize them
+- ``.organize`` - will take gear on the current page and send to shared stash
 - ``.organize scan`` - will re-organize all gear in the entire shared stash
 - ``.organize sell`` - will sell all the duplicate gear in the "outbox" pages (default 20-29)
 
