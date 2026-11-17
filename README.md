@@ -12,9 +12,9 @@ A mod for Diablo II that adds a chat command storage system. The idea is to inte
 
 ## Features
 
-- **Quick Store** - press a key to send all common items to storage
-- **PlugY Sorter** - press a key to send items straight to shared stash
-- **Holy Grail** - keep track of your progress on the Holy Grail quest
+- **Chat Store** - enter a command to send common items to storage
+- **PlugY Organizer** - enter a command to send gear straight to shared stash (**EXPERIMENTAL**))
+- **Holy Grail** - track of your progress on the Holy Grail quest
 
 ## Usage
 
@@ -45,9 +45,9 @@ The mod is forgiving on the shorthand names you can pass:
 
 The shared stash auto-organizer is controlled by a [configuration file](build/quartermaster_organize.cfg) designed around an [organization concept](ORGANIZATION.md).
 
-- ``.organize`` - will take items on the current page and organize them
-- ``.organize scan`` - will re-organize all items in the entire shared stash
-- ``.organize sell`` - will sell all the duplicate items in the "outbox" page rages (default 20-29)
+- ``.organize`` - will take gear on the current page and organize them
+- ``.organize scan`` - will re-organize all gear in the entire shared stash
+- ``.organize sell`` - will sell all the duplicate gear in the "outbox" pages (default 20-29)
 
 Pressing the ``Delete`` key will perform the same action as the ``.organize`` command.
 
