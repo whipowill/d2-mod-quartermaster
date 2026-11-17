@@ -12,6 +12,12 @@ A mod for Diablo II that adds a chat command storage system. The idea is to inte
 
 ## Features
 
+- **Quick Store** - press a key to send all common items to storage
+- **PlugY Sorter** - press a key to send items straight to shared stash
+- **Holy Grail** - keep track of your progress on the Holy Grail quest
+
+## Usage
+
 This mod is intended to make storing common items a lot easier:
 
 - ``.deposit`` - moves all storable items into the quartermaster bank
@@ -20,15 +26,6 @@ This mod is intended to make storing common items a lot easier:
 - ``.storage [potions|gems|runes|essences|keys|organs|shards]`` - shows what you have in that category
 
 Pressing the ``Insert`` key will perform the same action as the ``.deposit`` command.
-
-### Holy Grail
-
-- ``.grail`` - shows your Holy Grail progress as a percentage
-- ``.grail unique`` / ``.grail set`` - progress for just uniques or just set items
-- ``.grail scan`` - imports finds from your saved characters and PlugY stashes
-- ``.grail missing [unique|set]`` - lists items you haven't found yet
-
-Progress is tracked in a ``quartermaster_grail.txt``  which you can delete to restart the quest.
 
 ### Examples
 
@@ -41,6 +38,25 @@ The mod is forgiving on the shorthand names you can pass:
 .take cham rune 1
 .take perfect skull 1
 ```
+
+### PlugY Organizer
+
+The shared stash auto-organizer is controlled by a [configuration file](build/quartermaster_organize.cfg) designed around an [organization concept](ORGANIZATION.md).
+
+- ``.organize`` - will take items on the current page and organize them
+- ``.organize scan`` - will re-organize scan items in the entire shared stash
+- ``.organize sell`` - will sell all the duplicate items in the "outbox" page rages (default 20-29)
+
+Pressing the ``Delete`` key will perform the same action as the ``.organize`` command.
+
+### Holy Grail
+
+- ``.grail`` - shows your Holy Grail progress as a percentage
+- ``.grail unique`` / ``.grail set`` - progress for just uniques or just set items
+- ``.grail scan`` - imports finds from your saved characters and PlugY stashes
+- ``.grail missing [unique|set]`` - lists items you haven't found yet
+
+Progress is tracked in a ``quartermaster_grail.txt``  which you can delete to restart the quest.
 
 ### Cheats
 

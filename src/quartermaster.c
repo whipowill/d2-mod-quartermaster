@@ -10,6 +10,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "organize.h"
+#include "organize_live.h"
 #include "sig.h"
 
 static FILE *g_log;
@@ -18,6 +20,12 @@ static int g_town_only = 1;                                // ini [storage] town
 static int g_st_stash = 0;                                 // ini [storage] stash: 1 = deposit also takes items from the stash (default off)
 static int g_key_deposit = 0x2D;                           // ini [keys] deposit (default Insert, VK_INSERT); 0 = no key
 static int g_grail = 1;                                    // ini [grail] enabled: Holy Grail tracking
+static int g_key_organize = 0x2E;                            // ini [keys] organize (default Delete, VK_DELETE); 0 = no key
+static volatile LONG g_key_req2;                            // the organize key was pressed (handled on the game thread)
+static void do_organize(int all);
+static volatile LONG g_org_mode;                            // what the game now running is, as seen by PlugY's stash load: 0 = unknown, 1 = single player, 2 = multiplayer
+static int g_org_enabled = 0, g_org_auto = 0, g_org_autosell = 0, g_sell_vendor = 154;      // [organize] autosell: sell the outbox after every .organize; sell_vendor = the vendor (NPC class id) whose price list a sale uses (154 = Charsi)
+static volatile LONG g_sell_n, g_sell_gold, g_sell_full, g_sell_abort;                                    // totals of the sale in progress (the server thread adds, the game thread reports)              // ini [organize] enabled (master switch) / auto (sort the in-box pages at every character load)
 static int g_cheat_spawn = 0;               // ini [cheats] spawn: .spawn / .spawn unique / .spawn set (default off)
 static int g_logging = 0;                 // ini [quartermaster] logging: 1 writes quartermaster.log (default off)
 static volatile LONG g_lines;
@@ -270,7 +278,9 @@ static int pick_pop(DWORD *guid) {
 #define D2GAME_TIMESTAMP_113D 1318970639u
 #define QM_PKT 0x2b
 #define QM_PKT_SIZE 9
-enum { QM_CMD_SCAN = 1, QM_CMD_SPAWN = 2, QM_CMD_SPAWN_UNIQUE = 3, QM_CMD_SPAWN_SET = 4, QM_CMD_DEPOSIT = 5, QM_CMD_TAKE = 6, QM_CMD_GRAIL = 7 };
+enum { QM_CMD_SCAN = 1, QM_CMD_SPAWN = 2, QM_CMD_SPAWN_UNIQUE = 3, QM_CMD_SPAWN_SET = 4, QM_CMD_DEPOSIT = 5, QM_CMD_TAKE = 6, QM_CMD_GRAIL = 7, QM_CMD_DUMP = 8, QM_CMD_LIVE = 9 };
+static void srv_live(DWORD game, DWORD player, int scope, int page);
+static void sell_start(int automatic);
 static DWORD g_dg;                                                        // D2Game base while loaded
 typedef DWORD (__stdcall *dg_fn1)(DWORD);
 typedef DWORD (__stdcall *dg_fn6)(DWORD, void *, DWORD, DWORD, DWORD, DWORD);
@@ -499,7 +509,7 @@ static int cat_mask_enabled(void) { return (g_st_rejuv ? CAT_REJUV : 0) | (g_st_
 
 // .deposit [rejuv|gems|runes]: every item in the inventory or the cube, plus the stash when [storage] stash=1 (never the belt, hands, equipment or sockets) of the chosen, enabled types
 // goes to the file. mask = CAT_* bits.
-static void srv_deposit(DWORD game, DWORD player, int mask) {
+static void srv_deposit(DWORD game, DWORD player, int mask, int stash_open) {
     if (!thunk_ok(0xa46c) || !thunk_ok(0xa60a) || !thunk_ok(0xa508)) { say(L"[Quartermaster] Deposit failed: unexpected game version."); return; }
     if (!readable((void *)player, 0x70) || *(DWORD *)player != 0) return;
     if (!town_ok(player)) return;
@@ -507,6 +517,8 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
     if (!inv || !readable((void *)inv, 0x10)) return;
     mask &= cat_mask_enabled();
     if (!mask) { say(L"[Quartermaster] That item type is not allowed."); return; }
+    int use_stash = g_st_stash && stash_open;                                                    // [storage] stash=1 only counts while the stash window is open
+    logf_("deposit: stash setting %d, stash window open %d", g_st_stash, stash_open);
     dg_fn1 cls_of = (dg_fn1)(g_dg + 0xa508);
     DWORD cs = cls_of(0x20737672), cl = cls_of(0x206c7672);                                      // "rvs ", "rvl "
     DWORD gcls[64], rcls[64], ecls[16], kcls[8], ocls[8], wcls[4];
@@ -533,15 +545,15 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
         if (!match && (mask & CAT_SHARDS)) for (int i = 0; i < g_nshards && !match; i++) if (wcls[i] == cls) { code = *(DWORD *)g_shards[i].code; match = 1; }
         if (!match) continue;
         DWORD page = ((dg_fn1)(g_dg + 0xa59e))(it) & 0xFF;                                      // which container grid holds it
-        if (page != INV_PAGE && page != CUBE_PAGE && !(page == STASH_PAGE && g_st_stash)) {      // the stash (unless enabled) and anything else stays where it is
-            if (++skipped <= 3) logf_("deposit: left alone class=%lu on page %lu (stash %s)", (unsigned long)cls, (unsigned long)page, g_st_stash ? "included" : "excluded");
+        if (page != INV_PAGE && page != CUBE_PAGE && !(page == STASH_PAGE && use_stash)) {      // the stash (unless enabled) and anything else stays where it is
+            if (++skipped <= 3) logf_("deposit: left alone class=%lu on page %lu (stash %s)", (unsigned long)cls, (unsigned long)page, use_stash ? "included" : "excluded");
             continue;
         }
         if (n < 3) logf_("deposit: taking class=%lu from page %lu", (unsigned long)cls, (unsigned long)page);
         list[n].item = it; list[n].code = code; list[n++].halves = halves;
     }
     if (!n) {
-        if (skipped) say(L"[Quartermaster] Nothing to deposit. I left %d item(s) in the stash alone.", skipped);
+        if (skipped && g_st_stash) say(L"[Quartermaster] Nothing to deposit. I left %d item(s) in the stash alone%ls.", skipped, g_st_stash && !stash_open ? L" (open your stash to include them)" : L"");
         else say(L"[Quartermaster] Nothing to deposit.");
         return;
     }
@@ -563,7 +575,7 @@ static void srv_deposit(DWORD game, DWORD player, int mask) {
         add_part(rec, sizeof rec, nr, "potion(s)"); add_part(rec, sizeof rec, ng, "gem(s)"); add_part(rec, sizeof rec, nu, "rune(s)"); add_part(rec, sizeof rec, ne, "essence(s)"); add_part(rec, sizeof rec, nk, "key(s)"); add_part(rec, sizeof rec, no, "organ(s)"); add_part(rec, sizeof rec, nw, "shard(s)");
         if (rec[0]) say(L"[Quartermaster] Deposited %hs.", rec); else say(L"[Quartermaster] nothing could be deposited");
     }
-    if (skipped) say(L"[Quartermaster] I left %d item(s) in the stash alone.", skipped);
+    if (skipped && g_st_stash) say(L"[Quartermaster] I left %d item(s) in the stash alone%ls.", skipped, g_st_stash && !stash_open ? L" (open your stash to include them)" : L"");
 }
 
 // .take ITEM AMOUNT: create up to AMOUNT of the item beside the player and queue them for the client to pick up (the game's own pickup
@@ -673,6 +685,44 @@ static void srv_grail(DWORD player, int rescan) {
     }
 }
 
+
+// ---- diagnostic: PlugY's stash lists as seen by one side (the server unit or the client unit). Read only. -------------------------------------------------------------
+// layout (PlugY source, v14.03): unit+0x14 -> player data, +g_org_shift_py -> {flags, sharedGold, nbSelfPages, nbSharedPages, currentStash, selfStash, sharedStash};
+// Stash = {id, flags, name, ptListItem, previousStash, nextStash}; items are chained through ItemData(+0x14 of the unit)+0x64; ItemData+0x45 = page (4 = stash)
+static DWORD g_org_shift_spec, g_org_shift_py;                              // set when PlugY is hooked (qm_org_hook installer)
+static int rd32(DWORD a, DWORD *v) { if (!a || !readable((const void *)a, 4)) return 0; *v = *(const DWORD *)a; return 1; }
+static void stash_dump(const char *who, DWORD unit) {
+    if (!g_org_shift_spec || !g_org_shift_py) { logf_("stashdump %s: PlugY data offsets unknown (organizer not attached)", who); return; }
+    DWORD pd, cur, selfs, shared, nself, nshared, flags, gold, type = 9, id = 0;
+    if (!rd32(unit, &type) || type != 0 || !rd32(unit + 0x0C, &id) || !rd32(unit + g_org_shift_spec, &pd) || !pd) { logf_("stashdump %s: no player unit", who); return; }
+    DWORD py = pd + g_org_shift_py;
+    if (!rd32(py, &flags) || !rd32(py + 4, &gold) || !rd32(py + 8, &nself) || !rd32(py + 12, &nshared) || !rd32(py + 16, &cur) || !rd32(py + 20, &selfs) || !rd32(py + 24, &shared)) { logf_("stashdump %s: PlugY data unreadable", who); return; }
+    DWORD cid = 0, cfl = 0; rd32(cur, &cid); rd32(cur + 4, &cfl);
+    logf_("stashdump %s: unit id %lu, PlugY flags %lx, selfPages %lu, sharedPages %lu, current stash %s page %lu", who, (unsigned long)id, (unsigned long)flags, (unsigned long)nself, (unsigned long)nshared, (cfl & 1) ? "SHARED" : "personal", (unsigned long)cid + 1);
+    for (int pass = 0; pass < 2; pass++) {
+        DWORD st = pass ? shared : selfs; int pages = 0, nonempty = 0, total = 0;
+        for (int g = 0; st && g < 3000; g++, rd32(st + 20, &st)) {
+            DWORD sid = 0, sfl = 0, head = 0; if (!rd32(st, &sid) || !rd32(st + 4, &sfl) || !rd32(st + 12, &head)) break; pages++;
+            int n = 0; DWORD first = 0, u = head;
+            for (int k = 0; u && k < 4000; k++) { DWORD idd = 0, idata = 0, nx = 0; if (!rd32(u, &type) || !rd32(u + 0x0C, &idd) || !rd32(u + 0x14, &idata) || !idata) break; if (!n) first = idd; n++; if (!rd32(idata + 0x64, &nx)) break; u = nx; }
+            if (n) { nonempty++; total += n; if (nonempty <= 6) logf_("stashdump %s: %s page %lu flags %lx: %d item unit(s) in its list, first unit id %lu", who, pass ? "shared" : "personal", (unsigned long)sid + 1, (unsigned long)sfl, n, (unsigned long)first); }
+        }
+        logf_("stashdump %s: %s stash chain: %d pages, %d with items in the lists (%d item units)", who, pass ? "shared" : "personal", pages, nonempty, total);
+    }
+    // the player's inventory: how many items it holds that are marked as stash items (page 4) - these are the open page
+    DWORD inv = 0, first = 0; int inpage = 0, all = 0;
+    if (rd32(unit + 0x60, &inv) && rd32(inv + 0x0C, &first)) for (DWORD u = first; u && all < 4000; all++) { DWORD idata = 0, nx = 0; if (!rd32(u + 0x14, &idata) || !idata) break; BYTE pg = 0xFF; if (readable((const void *)(idata + 0x45), 1)) pg = *(const BYTE *)(idata + 0x45); if (pg == 4) inpage++; if (!rd32(idata + 0x64, &nx)) break; u = nx; }
+    logf_("stashdump %s: the inventory holds %d items, %d of them on the stash page (the open page)", who, all, inpage);
+}
+static int send_cmd(int cmd, DWORD a, int b, int c);
+static void stash_dump_client_and_ask_server(void) {
+    if (!g_logging) { say(L"[Quartermaster] Set logging=1 in quartermaster.ini first; the dump goes to quartermaster.log."); return; }
+    HMODULE cl = GetModuleHandleA("D2Client.dll"); DWORD ch = cl ? ((DWORD (__stdcall *)(void))((BYTE *)cl + 0x613C0))() : 0;
+    stash_dump("client", ch);
+    if (!send_cmd(QM_CMD_DUMP, 0, 0, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
+    else say(L"[Quartermaster] Stash lists written to quartermaster.log.");
+}
+
 // The packet handler the server thread calls: fastcall(ecx = game, edx = player, buf, size); callee pops the two stack args.
 static int __attribute__((fastcall)) qm_srv(DWORD game, DWORD player, const BYTE *buf, int size) {
     if (size != QM_PKT_SIZE || !readable(buf, QM_PKT_SIZE) || buf[0] != QM_PKT || !g_dg) return 0;
@@ -682,9 +732,11 @@ static int __attribute__((fastcall)) qm_srv(DWORD game, DWORD player, const BYTE
         case QM_CMD_SCAN: srv_scan(player); break;
         case QM_CMD_SPAWN: if (g_cheat_spawn) srv_spawn(game, player, a, buf[6]); break;
         case QM_CMD_SPAWN_UNIQUE: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 0); break;
-        case QM_CMD_DEPOSIT: srv_deposit(game, player, buf[6]); break;
+        case QM_CMD_DEPOSIT: srv_deposit(game, player, buf[6], buf[7] & 1); break;      // buf[7] bit 0 = the client had the stash window open
         case QM_CMD_TAKE: srv_take(game, player, a, buf[6]); break;
         case QM_CMD_GRAIL: if (g_grail) srv_grail(player, buf[6]); break;
+        case QM_CMD_DUMP: stash_dump("server", player); break;
+        case QM_CMD_LIVE: srv_live(game, player, buf[6], buf[7] | buf[8] << 8); break;           // .organize: the sort runs here, on the server thread
         case QM_CMD_SPAWN_SET: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 1); break;
     }
     g_reply_player = 0;
@@ -757,33 +809,40 @@ static void pick_pump(void) {
 }
 
 // .deposit and the deposit key. mask = CAT_* bits; the config switches are applied here and again on the server.
+static int stash_window_open(void) {                                       // D2Client UI state 0x19 (UI_STASH), same table as the chat-box flag (state 5)
+    HMODULE cl = GetModuleHandleA("D2Client.dll");
+    if (!cl || !p_print) return 0;                                         // only for the stock 1.13d D2Client
+    const DWORD *v = (const DWORD *)((BYTE *)cl + 0x11C890 + 0x19 * 4);
+    return readable(v, 4) && *v != 0;
+}
 static void do_deposit(int mask) {
     mask &= cat_mask_enabled();
     if (!mask) { say(L"[Quartermaster] That item type is not allowed."); return; }
     if ((mask & (CAT_GEMS | CAT_RUNES | CAT_ESS | CAT_KEYS | CAT_ORGANS | CAT_SHARDS)) && !misc_load()) mask &= CAT_REJUV;                  // Misc.txt unreadable: rejuvenation potions only
     if (!mask) { say(L"[Quartermaster] I could not read the item list."); return; }
-    if (!send_cmd(QM_CMD_DEPOSIT, 0, mask, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
+    if (!send_cmd(QM_CMD_DEPOSIT, 0, mask, g_st_stash && stash_window_open() ? 1 : 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
 }
 // The key: polled on its own thread (never runs game code); when it fires in a game, in the focused window, with the chat box closed, it sets
 // g_key_req and the next h_recv (game thread) does the deposit. Same guards as qol-ui's keys: D2Client +0x613C0 = GetPlayer, UI var 5 = chat box.
 static volatile LONG g_key_req;
 static DWORD WINAPI key_thread(LPVOID arg) {
     (void)arg;
-    int prev = 0;
+    int prev = 0, prev2 = 0;
     for (;;) {
         Sleep(40);
-        int vk = g_key_deposit;
-        if (!vk) continue;
-        int down = (GetAsyncKeyState(vk) & 0x8000) != 0, fire = down && !prev;
-        prev = down;
-        if (!fire || !p_print || !g_srv_ready) continue;                                       // p_print is only set for the stock 1.13d D2Client
+        int vk = g_key_deposit, vk2 = g_org_enabled ? g_key_organize : 0;
+        if (!vk && !vk2) continue;
+        int down = vk && (GetAsyncKeyState(vk) & 0x8000) != 0, fire = down && !prev; prev = down;
+        int down2 = vk2 && (GetAsyncKeyState(vk2) & 0x8000) != 0, fire2 = down2 && !prev2; prev2 = down2;
+        if ((!fire && !fire2) || !p_print || !g_srv_ready) continue;                           // p_print is only set for the stock 1.13d D2Client
         HWND w = GetForegroundWindow(); DWORD pid = 0;
         if (w) GetWindowThreadProcessId(w, &pid);
         HMODULE cl = GetModuleHandleA("D2Client.dll");
         if (pid != GetCurrentProcessId() || !cl) continue;
         if (!((DWORD (__stdcall *)(void))((BYTE *)cl + 0x613C0))()) continue;                   // not in a game
         if (*(DWORD *)((BYTE *)cl + 0x11C890 + 5 * 4)) continue;                                // chat box open
-        InterlockedExchange(&g_key_req, 1);
+        if (fire) InterlockedExchange(&g_key_req, 1);
+        if (fire2) InterlockedExchange(&g_key_req2, 1);
     }
     return 0;
 }
@@ -1296,7 +1355,7 @@ static int qm_command(const char *text) {
     const char *args = text + i;
     if (!strcmp(word, "find")) strcpy(word, "lookup");                   // aliases: .find = .lookup, .withdraw = .take
     else if (!strcmp(word, "take")) strcpy(word, "withdraw");   // internal name stays "withdraw"
-    if (strcmp(word, "deposit") && strcmp(word, "withdraw") && strcmp(word, "storage") && strcmp(word, "spawn") && strcmp(word, "lookup") && strcmp(word, "scan") && strcmp(word, "grail")) return 0;
+    if (strcmp(word, "deposit") && strcmp(word, "withdraw") && strcmp(word, "storage") && strcmp(word, "spawn") && strcmp(word, "lookup") && strcmp(word, "scan") && strcmp(word, "grail") && strcmp(word, "organize") && strcmp(word, "stashdump")) return 0;
     logf_("command: .%s %s", word, args);
     if (!strcmp(word, "spawn") && !g_cheat_spawn) {                       // cheat, off unless the ini says otherwise
         say(L"[Quartermaster] Spawn is not allowed.");
@@ -1332,8 +1391,8 @@ static int qm_command(const char *text) {
                 if (hits++ == 0) found = u;
             }
         }
-        if (ok && found < 0) say(L"[Quartermaster] I know no %hs item like '%.40hs'. Try .lookup.", set ? "set" : "unique", name);
-        else if (ok && hits > 1) say(L"[Quartermaster] %d items match '%.40hs'. Use .lookup and spawn by #index.", hits, name);
+        if (ok && found < 0) say(L"[Quartermaster] I know no %hs item like '%.40hs'. Try \".lookup\".", set ? "set" : "unique", name);
+        else if (ok && hits > 1) say(L"[Quartermaster] %d items match '%.40hs'. Use \".lookup\" and spawn by #index.", hits, name);
         else if (ok) {
             logf_("spawn %s: '%s' code '%.4s' #%d", set ? "set" : "unique", arr[found].name, arr[found].code, found);
             if (!send_cmd(set ? QM_CMD_SPAWN_SET : QM_CMD_SPAWN_UNIQUE, *(DWORD *)arr[found].code, 1, found)) say(L"[Quartermaster] Not ready. Start or join a game first.");
@@ -1353,6 +1412,10 @@ static int qm_command(const char *text) {
         cmd_grail(args);
     } else if (!strcmp(word, "storage")) {                                // .storage [rejuv|gems|runes]
         cmd_storage(args);
+    } else if (!strcmp(word, "stashdump")) {                             // diagnostic: log PlugY's stash lists as the server and the client see them (changes nothing)
+        stash_dump_client_and_ask_server();
+    } else if (!strcmp(word, "organize")) {                              // .organize (the shared page you look at) | .organize scan (the whole shared stash)
+        if (!*args) do_organize(0); else if (!_stricmp(args, "scan")) do_organize(1); else if (!_stricmp(args, "sell")) sell_start(0); else say(L"[Quartermaster] Usage: .organize   or   .organize scan   or   .organize sell");
     } else if (!strcmp(word, "scan")) {                                   // diagnostic: log every owned item's saved bytes
         if (!send_cmd(QM_CMD_SCAN, 0, 0, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
     } else if (!strcmp(word, "deposit")) {                                // .deposit [rejuv|gems|runes]
@@ -1438,11 +1501,424 @@ static int __stdcall h_send(int size, int arg, void *pkt) {
     return r;
 }
 
+
+// ---- stash organizer: sort the shared stash while a character loads (NOTES.md section 20) -----------------------------------
+// PlugY builds each character's shared stash from the .sss bytes in loadSharedSaveFile (eax = player, ebx = bytes, size on the stack). We detour that
+// function: the bytes go through the organizer first (org_sort, organize.c) and PlugY then builds the pages from the sorted copy. On any problem the
+// original bytes are passed through, so the worst case is "nothing happens". The client and the server both call it with the same bytes and the sort is
+// deterministic, so both end up with the same pages.
+static org_ctx *g_org; static int g_org_tables;                           // g_org_tables: 1 = the game tables are loaded
+static CRITICAL_SECTION g_org_cs; static volatile int g_org_cs_ok;
+static char g_org_pending[1800]; static DWORD g_org_last_tick; static char g_org_last[300];
+static unsigned char *read_whole(const char *path, size_t *n) {
+    FILE *f = fopen(path, "rb"); if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long l = ftell(f); fseek(f, 0, SEEK_SET); if (l <= 0) { fclose(f); return NULL; }
+    unsigned char *b = (unsigned char *)malloc((size_t)l + 1); *n = fread(b, 1, (size_t)l, f); b[*n] = 0; fclose(f); return b;
+}
+static const char *g_org_tab;                                                // the table org_prepare is reading right now
+static int org_table_cb(const char *buf, int n) { return org_load_table(g_org, g_org_tab, buf, (size_t)n) ? 1 : -1; }
+static int org_prepare(void) {                                              // tables once, the rules file every time (so edits apply to the next load)
+    if (!g_org) g_org = org_create();
+    if (!g_org_tables) {
+        // the game's own tables, through Storm exactly like the game reads them (loose Data folder first under -direct, otherwise the archives): nobody needs loose files
+        static const char *tabs[] = { "ItemTypes", "Weapons", "Armor", "Misc", "UniqueItems", "SetItems", "MagicPrefix", "MagicSuffix", "ItemStatCost", "Inventory" };
+        for (int i = 0; i < 10; i++) {
+            char path[128]; snprintf(path, sizeof path, "Data\\global\\excel\\%s.txt", tabs[i]); g_org_tab = tabs[i];
+            int r = storm_read(path, org_table_cb);
+            if (r <= 0) { logf_("organize: cannot read %s through Storm (result %d)", path, r); return 0; }
+        }
+        g_org_tables = 1; logf_("organize: game tables loaded");
+    }
+    size_t n; unsigned char *cfg = read_whole("quartermaster_organize.cfg", &n); char err[160];
+    if (!cfg) { logf_("organize: quartermaster_organize.cfg not found"); return 0; }
+    int ok = org_load_config(g_org, (char *)cfg, n, err, sizeof err); free(cfg);
+    if (!ok) logf_("organize: rules file error: %s", err);
+    return ok;
+}
+static void org_queue_chat(const char *rep) {                               // held until a game is on screen (see org_pending_flush)
+    if (!rep || !*rep || !g_org_cs_ok) return;
+    EnterCriticalSection(&g_org_cs);
+    DWORD now = GetTickCount();
+    if (now - g_org_last_tick < 8000 && !strncmp(g_org_last, rep, sizeof g_org_last - 1)) { LeaveCriticalSection(&g_org_cs); return; }   // the server and the client both run the sort: say it once
+    g_org_last_tick = now; snprintf(g_org_last, sizeof g_org_last, "%s", rep);
+    size_t l = strlen(g_org_pending); size_t r = strlen(rep);
+    if (l + r + 2 < sizeof g_org_pending) { memcpy(g_org_pending + l, rep, r); g_org_pending[l + r] = 0; }
+    LeaveCriticalSection(&g_org_cs);
+}
+static void org_game_watch(void) {                                          // game thread, every frame: leaving a game resets what we know about it
+    static int was; HMODULE cl = GetModuleHandleA("D2Client.dll");
+    int in = cl && p_print && ((DWORD (__stdcall *)(void))((BYTE *)cl + 0x613C0))() != 0;
+    if (was && !in) g_org_mode = 0;
+    was = in;
+}
+static void org_pending_flush(void) {                                       // game thread (h_recv), only while the player exists
+    if (!g_org_cs_ok || !g_org_pending[0] || !p_print) return;
+    HMODULE cl = GetModuleHandleA("D2Client.dll"); if (!cl) return;
+    if (!((DWORD (__stdcall *)(void))((BYTE *)cl + 0x613C0))()) return;
+    char tmp[1800]; EnterCriticalSection(&g_org_cs); snprintf(tmp, sizeof tmp, "%s", g_org_pending); g_org_pending[0] = 0; LeaveCriticalSection(&g_org_cs);
+    for (char *line = tmp; *line;) { char *nl = strchr(line, '\n'); if (nl) *nl = 0; if (*line) say(L"[Quartermaster] %hs", line); if (!nl) break; line = nl + 1; }
+}
+void *qm_org_tramp;
+static int g_org_hooked;                                                   // the PlugY detour is installed
+static int g_org_req_scope = -1, g_org_req_page; static DWORD g_org_req_until;   // a typed command waiting for the next character load
+static DWORD g_org_mp_ret;                                                 // return address of PlugY's multiplayer caller (LoadMPCustomData); 0 = could not be identified
+int __cdecl __attribute__((used)) qm_org_hook(DWORD ptChar, const BYTE *data, DWORD size, DWORD ret, BYTE **newdata, DWORD *newsize) {
+    (void)ptChar; *newdata = NULL; *newsize = 0;
+    if (!g_org_cs_ok || !data || size < 14 || !readable(data, size)) return 0;
+    // The organizer exists for single player only: automatic sort and typed requests alike, whatever PlugY.ini says. PlugY calls this function from two places,
+    // LoadSPPlayerCustomData (single player) and LoadMPCustomData (a TCP/IP host loading what a joining player sent). Anything but the single-player caller
+    // (including a caller that could not be identified at install time) is multiplayer as far as we are concerned and is left alone.
+    int is_mp = (g_org_mp_ret == 0) || ret == g_org_mp_ret;
+    g_org_mode = is_mp ? 2 : 1;
+    if (is_mp) {
+        static int said; if (!said) { said = 1; logf_("organize: multiplayer game (or unidentified caller): the organizer is disabled"); }
+        if (g_org_req_scope >= 0) { g_org_req_scope = -1; org_queue_chat("The organize request was cancelled: the organizer is disabled in multiplayer games.\n"); }
+        return 0;
+    }
+    EnterCriticalSection(&g_org_cs);
+    int rv = 0;
+    int scope = ORG_AUTO, rpage = 0, requested = 0;
+    if (g_org_req_scope >= 0) {                                              // a typed .organize: used for both loads (server and client) of the next character
+        DWORD now = GetTickCount(); if (!g_org_req_until) g_org_req_until = now + 15000;
+        if (now < g_org_req_until) { scope = g_org_req_scope; rpage = g_org_req_page; requested = 1; } else g_org_req_scope = -1;
+    }
+    if (g_org_enabled && (g_org_auto || requested) && org_prepare()) {
+        int big = GetPrivateProfileIntA("STASH", "ActiveBigStash", -1, ".\\PlugY.ini");
+        if (big < 0) big = GetPrivateProfileIntA("STASH", "ActiveBigStash", 0, ".\\PlugY\\PlugYDefault.ini");
+        int gx, gy; org_grid(g_org, big > 0, &gx, &gy);
+        unsigned char *out = NULL; size_t on = 0; int moved = 0; char *rep = NULL;
+        int ok = org_sort(g_org, data, size, scope, rpage, gx, gy, &out, &on, &moved, &rep);
+        if (!ok) logf_("organize: not sorted (the stash is used as it is)");
+        else if (moved > 0 && on > 0) { *newdata = out; *newsize = (DWORD)on; rv = 1; }
+        else free(out);
+        if (rep) {
+            char *q = rep;
+            for (char *line = q; *line;) { char *nl = strchr(line, '\n'); if (nl) *nl = 0; if (*line) logf_("organize: %s", line); if (!nl) break; line = nl + 1; }
+            free(rep);
+        }
+        if (requested && ok) { char sm[600]; org_summary(g_org, sm, sizeof sm); strcat(sm, "\n"); org_queue_chat(sm); }      // chat only for a command you typed
+    }
+    LeaveCriticalSection(&g_org_cs);
+    return rv;
+}
+void __cdecl __attribute__((used)) qm_org_free(BYTE *p) { free(p); }
+__asm__(
+    ".text\n"
+    ".globl _qm_org_stub\n"
+    "_qm_org_stub:\n"                                    // entered like the original: eax = player, ebx = bytes, [esp] = return, [esp+4] = size
+    "  pushl %ebp\n  movl %esp,%ebp\n  subl $8,%esp\n"
+    "  pushl %eax\n  pushl %ebx\n  pushl %ecx\n  pushl %edx\n  pushl %esi\n  pushl %edi\n"
+    "  movl $0,-4(%ebp)\n  movl $0,-8(%ebp)\n"
+    "  leal -8(%ebp),%edx\n  pushl %edx\n  leal -4(%ebp),%edx\n  pushl %edx\n"
+    "  pushl 4(%ebp)\n  pushl 8(%ebp)\n  pushl %ebx\n  pushl %eax\n"
+    "  call _qm_org_hook\n  addl $24,%esp\n"
+    "  popl %edi\n  popl %esi\n  popl %edx\n  popl %ecx\n  popl %ebx\n  popl %eax\n"
+    "  movl -4(%ebp),%edx\n  testl %edx,%edx\n  jz 1f\n"
+    "  movl %edx,%ebx\n  pushl -8(%ebp)\n  call *_qm_org_tramp\n  addl $4,%esp\n"      // the sorted copy and its size
+    "  pushl %eax\n  pushl -4(%ebp)\n  call _qm_org_free\n  addl $4,%esp\n  popl %eax\n  jmp 2f\n"
+    "1:\n  pushl 8(%ebp)\n  call *_qm_org_tramp\n  addl $4,%esp\n"                         // unchanged: the original bytes and size
+    "2:\n  movl %ebp,%esp\n  popl %ebp\n  ret\n");
+extern void qm_org_stub(void);
+// finds loadSharedSaveFile in PlugY.dll by its first bytes (push ecx; push esi; mov esi,eax; test esi,esi; je; test ebx,ebx; je) and detours it
+static int org_install(void) {
+    HMODULE m = GetModuleHandleA("PlugY.dll"); if (!m) return 0;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((BYTE *)m + ((IMAGE_DOS_HEADER *)m)->e_lfanew);
+    IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+    static const BYTE pat[] = {0x51, 0x56, 0x8B, 0xF0, 0x85, 0xF6, 0x0F, 0x84, 0, 0, 0, 0, 0x85, 0xDB, 0x0F, 0x84};
+    static const BYTE msk[] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1};
+    BYTE *found = NULL; int hits = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        if (!(sec[i].Characteristics & IMAGE_SCN_CNT_CODE)) continue;
+        BYTE *a = (BYTE *)m + sec[i].VirtualAddress; DWORD len = sec[i].Misc.VirtualSize;
+        for (DWORD o = 0; o + sizeof pat + 4 < len; o++) {
+            int ok = 1; for (size_t k = 0; k < sizeof pat && ok; k++) if (msk[k] && a[o + k] != pat[k]) ok = 0;
+            // also the stock check "cmp dword [ebx], 'SSS'" a little further on (81 3B 53 53 53 00)
+            if (ok) { const BYTE sss[] = {0x81, 0x3B, 0x53, 0x53, 0x53, 0x00}; int k2 = 0; for (DWORD q = 0x10; q < 0x40 && !k2; q++) if (o + q + 6 < len && !memcmp(a + o + q, sss, 6)) k2 = 1; ok = k2; }
+            if (ok) { found = a + o; hits++; }
+        }
+    }
+    if (hits != 1) { logf_("organize: PlugY.dll loadSharedSaveFile found %d times (expected once); not installed", hits); return 0; }
+    // PlugY's multiplayer caller: the call to this function that follows the log string "Start LoadMPCustomData" in the same function
+    g_org_mp_ret = 0;
+    {   static const char needle[] = "Start LoadMPCustomData\n"; const BYTE *strva = NULL;
+        for (int i = 0; i < nt->FileHeader.NumberOfSections && !strva; i++) { const BYTE *a = (const BYTE *)m + sec[i].VirtualAddress; DWORD len = sec[i].Misc.VirtualSize;
+            for (DWORD o = 0; o + sizeof needle < len; o++) if (a[o] == 'S' && !memcmp(a + o, needle, sizeof needle - 1)) { strva = a + o; break; } }
+        const BYTE *xref = NULL, *best = NULL;
+        for (int i = 0; i < nt->FileHeader.NumberOfSections && strva; i++) { if (!(sec[i].Characteristics & IMAGE_SCN_CNT_CODE)) continue; const BYTE *a = (const BYTE *)m + sec[i].VirtualAddress; DWORD len = sec[i].Misc.VirtualSize;
+            for (DWORD o = 0; o + 5 < len; o++) { if (a[o] == 0x68 && *(const DWORD *)(a + o + 1) == (DWORD)strva) { xref = a + o; break; } } if (xref) break; }
+        for (int i = 0; i < nt->FileHeader.NumberOfSections && xref; i++) { if (!(sec[i].Characteristics & IMAGE_SCN_CNT_CODE)) continue; const BYTE *a = (const BYTE *)m + sec[i].VirtualAddress; DWORD len = sec[i].Misc.VirtualSize;
+            for (DWORD o = 0; o + 5 < len; o++) if (a[o] == 0xE8 && (DWORD)(a + o + 5) + *(const DWORD *)(a + o + 1) == (DWORD)found && a + o > xref && a + o < xref + 0x800 && (!best || a + o < best)) best = a + o; }
+        if (best) g_org_mp_ret = (DWORD)(best + 5);
+        logf_("organize: PlugY multiplayer caller %s (return address %p)", best ? "found" : "NOT found", (void *)g_org_mp_ret);
+    }
+    BYTE *tr = VirtualAlloc(NULL, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE); if (!tr) return 0;
+    memcpy(tr, found, 6); tr[6] = 0xE9; *(DWORD *)(tr + 7) = (DWORD)(found + 6) - (DWORD)(tr + 11);
+    qm_org_tramp = tr;
+    BYTE patch[6]; patch[0] = 0xE9; *(DWORD *)(patch + 1) = (DWORD)qm_org_stub - (DWORD)(found + 5); patch[5] = 0x90;
+    DWORD old; if (!VirtualProtect(found, 6, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    memcpy(found, patch, 6); VirtualProtect(found, 6, old, &old); FlushInstructionCache(GetCurrentProcess(), found, 6);
+    // PlugY keeps its per-player data at (unit + A) -> player data, + B (A and B are two globals the function reads: mov eax,[A]; mov edx,[B]); needed to read which stash page is open
+    for (DWORD o = 0x20; o < 0x120; o++) { const BYTE *q = found + o;
+        if (q[0] == 0xA1 && q[5] == 0x8B && q[6] == 0x15) { DWORD ga = *(const DWORD *)(q + 1), gb = *(const DWORD *)(q + 7);
+            if (readable((void *)ga, 4) && readable((void *)gb, 4)) { DWORD va = *(DWORD *)ga, vb = *(DWORD *)gb; if (va && va < 0x400 && vb && vb < 0x4000) { g_org_shift_spec = va; g_org_shift_py = vb; } } break; } }
+    logf_("organize: hooked PlugY loadSharedSaveFile at %p; PlugY data offsets %lx / %lx", (void *)found, (unsigned long)g_org_shift_spec, (unsigned long)g_org_shift_py);
+    g_org_hooked = 1;
+    return 1;
+}
+static DWORD WINAPI org_thread(LPVOID arg) {
+    (void)arg;
+    if (!g_org_enabled) return 0;                                                          // [organize] enabled=0: the feature does not exist
+    InitializeCriticalSection(&g_org_cs); g_org_cs_ok = 1;
+    for (int i = 0; i < 200 && !GetModuleHandleA("PlugY.dll"); i++) Sleep(100);              // PlugY loads this DLL, so it is normally there at once
+    if (!GetModuleHandleA("PlugY.dll")) {                                                  // the organizer only exists for PlugY's shared stash
+        logf_("organize: PlugY.dll is not loaded; the stash organizer is switched off");
+        org_queue_chat("The stash organizer needs PlugY, which is not installed. It is switched off.\n");
+        return 0;
+    }
+    if (!g_org_auto) logf_("organize: enabled, auto = 0 (only typed commands will sort)");
+    if (!org_install()) { logf_("organize: could not hook PlugY"); org_queue_chat("The stash organizer could not attach to PlugY (unsupported PlugY version?). It is switched off.\n"); }
+    return 0;
+}
+
+
+// the stash page the player is looking at, read from PlugY's data of the client player (page number as PlugY shows it, 1-based); 0 = unknown
+static int plugy_current_page(int *shared) {
+    HMODULE cl = GetModuleHandleA("D2Client.dll"); if (!cl || !g_org_shift_spec || !g_org_shift_py) return 0;
+    DWORD ch = ((DWORD (__stdcall *)(void))((BYTE *)cl + 0x613C0))(); if (!ch || !readable((void *)(ch + g_org_shift_spec), 4)) return 0;
+    DWORD pd = *(DWORD *)(ch + g_org_shift_spec); if (!pd || !readable((void *)(pd + g_org_shift_py), 0x20)) return 0;
+    DWORD cur = *(DWORD *)(pd + g_org_shift_py + 0x10); if (!cur || !readable((void *)cur, 8)) return 0;
+    DWORD id = *(DWORD *)cur, fl = *(DWORD *)(cur + 4); if (id > 5000) return 0;
+    *shared = (int)(fl & 1); return (int)id + 1;
+}
+// .organize / .organize scan / the organize key. PlugY holds the stash in memory while you play and writes it when you save, so the sort runs when the next character
+// loads (see qm_org_hook); here we only note what was asked for.
+// ---- live organize (NOTES.md section 20) ---------------------------------------------------------------------------------------------------------------------
+// .organize / .organize scan / the organize key. PlugY keeps every shared item in a per-page list on the server and on the client (same unit ids) while a personal page
+// is open; so the steps are: flip to a personal page with PlugY's own message, let the server thread sort and rewrite BOTH sides' lists (lv_run, all checks first, then
+// pointer writes only), then flip back to the shared page the player was on with PlugY's own navigation messages. The file that is written on save comes from the
+// server's lists (SaveSPPlayerCustomData), so what is sorted here is what is saved.
+enum { LV_IDLE = 0, LV_WAIT_SELF, LV_WAIT_AWAY, LV_WAIT_PARK, LV_WAIT_SERVER, LV_RESTORE, LV_SELL_NEXT, LV_SELL_SWAP1, LV_SELL_SERVER, LV_SELL_SWAP2 };
+static struct { volatile int state; DWORD t0, next_ms; int chk; volatile int ack, late_park, late_ack; int park, open_p, sell_cur, sell_lo, sell_hi, sell_p, sell_shared, sell_auto; int scope, page, prev_shared, prev_page, back_msg; volatile int server_done; int nav[80], nnav, ni; } g_lv;      // scope: 1 = whole stash, 2 = a shared page, 3 = a personal page (page = its number)
+static volatile DWORD g_lv_client_unit;
+static uint32_t lvm_rd(uint32_t a) { return *(const uint32_t *)(uintptr_t)a; }
+static void lvm_wr(uint32_t a, uint32_t v) { *(uint32_t *)(uintptr_t)a = v; }
+static int lvm_ok(uint32_t a, size_t n) { return readable((const void *)(uintptr_t)a, n); }
+static int lvm_save(uint32_t unit, unsigned char *buf, int cap) {                    // server thread only: the game's own item-to-bytes (JM, the item and its socketed items)
+    if (!thunk_ok(0xa6fa)) return 0;
+    static BYTE tmp[0x1000]; DWORD len = ((dg_fn6)(g_dg + 0xa6fa))(unit, tmp, 0x1000, 1, 1, 0);
+    if (len == 0 || len > 0x1000 || (int)len > cap) return 0; memcpy(buf, tmp, len); return (int)len;
+}
+// ---- .organize sell: the items in the stash grid (the outbox page that was swapped in) are sold the way a vendor sale does it: priced by the game's own transaction-cost function, paid in
+// gold, removed. D2Game's sell worker (0x6fc92a50) calls D2Common #10186 (ITEMS_GetTransactionCost) with (player, item, difficulty, the player's quest data of that difficulty, the vendor's class id,
+// 1 = sell), reads/adds the gold stat with #10550 / #10645 and the maximum with #11159; we call the same functions through D2Game's own import thunks.
+static int sell_price_ok(void) {
+    static const BYTE sig[] = {0x8B, 0x44, 0x24, 0x18, 0x8B, 0x4C, 0x24, 0x14, 0x8B, 0x54, 0x24, 0x10, 0x50};          // start of D2Common #10186 (it ends in ret 0x18 = six arguments)
+    HMODULE dc = GetModuleHandleA("D2Common.dll"); if (!dc) return 0;
+    BYTE *f = (BYTE *)GetProcAddress(dc, (LPCSTR)10186);
+    return f && readable(f, sizeof sig) && !memcmp(f, sig, sizeof sig) && thunk_ok(0xb0de) && thunk_ok(0xa3b8) && thunk_ok(0xa3a6) && thunk_ok(0xa74e) && thunk_ok(0xa5f8) && thunk_ok(0xa59e) && thunk_ok(0xa46c) && thunk_ok(0xa60a);
+}
+static void srv_sell(DWORD game, DWORD player) {
+    g_lv.server_done = 0;
+    if (!sell_price_ok()) { logf_("sell: unexpected game version"); say(L"[Quartermaster] Sell failed: unexpected game version."); InterlockedExchange(&g_sell_abort, 1); g_lv.server_done = 2; return; }
+    if (!readable((void *)player, 0x70) || *(DWORD *)player != 0 || !readable((void *)game, 0x80) || !town_ok(player)) { InterlockedExchange(&g_sell_abort, 1); g_lv.server_done = 2; return; }
+    DWORD inv = *(DWORD *)(player + 0x60); if (!inv || !readable((void *)inv, 0x10)) { g_lv.server_done = 2; return; }
+    DWORD pd = ((dg_fn1)(g_dg + 0xa5f8))(player); DWORD diff = *(BYTE *)(game + 0x6d);
+    if (!pd || diff > 2 || !readable((void *)(pd + 0x10 + diff * 4), 4)) { logf_("sell: player data not as expected"); g_lv.server_done = 2; return; }
+    DWORD quest = *(DWORD *)(pd + 0x10 + diff * 4);
+    DWORD items[300]; int n = 0, guard = 0;
+    for (DWORD it = ((dg_fn1)(g_dg + 0xa46c))(inv); it && guard++ < 3000 && is_item(it); it = ((dg_fn1)(g_dg + 0xa60a))(it))
+        if (*(DWORD *)(it + 0x10) == 0 && n < 300 && (((dg_fn1)(g_dg + 0xa59e))(it) & 0xFF) == STASH_PAGE) items[n++] = it;      // mode 0 = in a container, in the stash grid
+    typedef DWORD (__stdcall *fn_price)(DWORD, DWORD, DWORD, DWORD, DWORD, DWORD);
+    typedef int (__stdcall *fn_getstat)(DWORD, DWORD, DWORD);
+    typedef void (__stdcall *fn_addstat)(DWORD, DWORD, int, DWORD);
+    typedef DWORD (__stdcall *fn_maxgold)(DWORD);
+    int sold = 0; long long total = 0;
+    for (int i = 0; i < n; i++) {
+        int price = (int)((fn_price)(g_dg + 0xb0de))(player, items[i], diff, quest, (DWORD)g_sell_vendor, 1);
+        if (price < 0 || price > 20000000) { logf_("sell: item %08lx has an odd price (%d); left alone", (unsigned long)items[i], price); continue; }
+        int cur = ((fn_getstat)(g_dg + 0xa3b8))(player, 14, 0); int mx = (int)((fn_maxgold)(g_dg + 0xa74e))(player);
+        if (cur < 0 || mx <= 0 || (long long)cur + price > mx) { InterlockedExchange(&g_sell_full, 1); logf_("sell: gold %d + %d would pass the limit %d; stopping", cur, price, mx); break; }
+        if (!destroy_item(game, player, items[i])) { logf_("sell: could not remove item %08lx", (unsigned long)items[i]); break; }
+        ((fn_addstat)(g_dg + 0xa3a6))(player, 14, price, 0);
+        sold++; total += price; if (sold <= 5) logf_("sell: sold an item for %d gold", price);
+    }
+    logf_("sell: %d of %d item(s) sold for %lld gold (vendor %d, difficulty %lu)", sold, n, total, g_sell_vendor, (unsigned long)diff);
+    InterlockedExchangeAdd(&g_sell_n, sold); InterlockedExchangeAdd(&g_sell_gold, (LONG)total);
+    g_lv.server_done = 1;
+}
+static void srv_sell(DWORD game, DWORD player);
+static void srv_live(DWORD game, DWORD player, int scope, int page) {
+    if (scope == 5) { srv_sell(game, player); return; }                                  // .organize sell: sell the items that are in the stash grid right now
+    if (!g_org_cs_ok) return;
+    if (!g_org_shift_spec || !g_lv_client_unit) { say(L"[Quartermaster] The stash organizer is not ready."); g_lv.server_done = 2; return; }
+    EnterCriticalSection(&g_org_cs);
+    lv_result_t r; memset(&r, 0, sizeof r); int ok = 0;
+    if (org_prepare()) {
+        int big = GetPrivateProfileIntA("STASH", "ActiveBigStash", -1, ".\\PlugY.ini"); if (big < 0) big = GetPrivateProfileIntA("STASH", "ActiveBigStash", 0, ".\\PlugY\\PlugYDefault.ini");
+        int gx, gy; org_grid(g_org, big > 0, &gx, &gy);
+        lv_mem_t mem = { lvm_ok, lvm_rd, lvm_wr, lvm_save };
+        org_set_trace(g_org, g_logging);
+        ok = lv_run(&mem, g_org, g_org_shift_spec, g_org_shift_py, (uint32_t)player, (uint32_t)g_lv_client_unit, scope == 1 ? ORG_ALL : ORG_PAGE, scope == 3 ? 0 : page, gx, gy, scope == 3 ? page : 0, scope == 4 ? g_lv.open_p : 0, &r);
+    } else snprintf(r.err, sizeof r.err, "the rules file could not be read");
+    if (ok) {
+        char sm[600]; org_summary(g_org, sm, sizeof sm); logf_("organize (live): %d item(s) moved; %s", r.moved, sm); if (r.parse[0]) logf_("organize (live): %s", r.parse); if (r.detail[0]) logf_("organize (live) details:\n%s", r.detail);
+        if (scope == 3) org_summary_ex(g_org, r.imported, r.stayed, sm, sizeof sm);
+        for (char *line = sm; *line;) { char *nl = strchr(line, '\n'); if (nl) *nl = 0; if (*line) say(L"[Quartermaster] %hs", line); if (!nl) break; line = nl + 1; }
+    } else { logf_("organize (live): not done: %s", r.err); say(L"[Quartermaster] The stash could not be organized: %hs", r.err); }
+    LeaveCriticalSection(&g_org_cs);
+    g_lv.server_done = ok ? 1 : 2;
+}
+static void lv_send_plugy(int v) { int type = v & 0xFF; BYTE p[3] = {0x3A, (BYTE)type, (BYTE)((v >> 8) & 0xFF)}; if (g_arg >= 0) o_send(3, g_arg, p); }       // v = message type | argument << 8 (US_SELECT_SELF = 0x1B, SHARED = 0x1C, NEXT = 0x1A, NEXT_INDEX = 0x1E, NEXT_INDEX2 = 0x22)
+static DWORD client_player(void) { HMODULE cl = GetModuleHandleA("D2Client.dll"); return cl ? ((DWORD (__stdcall *)(void))((BYTE *)cl + 0x613C0))() : 0; }
+static int client_shared_flags(unsigned *fl, int cap) {                                // the client's shared page flags in order (index pages decide how the jump buttons move)
+    DWORD ch = client_player(); if (!ch || !g_org_shift_spec || !readable((void *)(ch + g_org_shift_spec), 4)) return 0;
+    DWORD pd = *(DWORD *)(ch + g_org_shift_spec); if (!pd || !readable((void *)(pd + g_org_shift_py), 0x20)) return 0;
+    int n = 0; for (DWORD st = *(DWORD *)(pd + g_org_shift_py + 0x18); st && n < cap && readable((void *)st, 0x18); st = *(DWORD *)(st + 0x14)) fl[n++] = *(DWORD *)(st + 4);
+    return n;
+}
+// The way back to shared page `target` (1-based): SELECT_SHARED (always shared page 1), then the same jumps PlugY's own buttons make (next main index 0x22, next index 0x1E, next page 0x1A),
+// which take the shortest route its page flags allow. NOT the swap/toggle page commands (US_SWAP*): those exchange the contents of two pages.
+static void lv_plan_nav(int target) {
+    static unsigned fl[3000]; g_lv.nnav = 0; g_lv.ni = 0; int n = client_shared_flags(fl, 3000);
+    g_lv.nav[g_lv.nnav++] = 0x1C;
+    if (n < target) return;
+    int cur = 0, t = target - 1;
+    while (cur < t && g_lv.nnav < 78) {
+        int c2 = cur + 1; while (c2 < n && !(fl[c2] & 4)) c2++;
+        int c1 = cur + 1; while (c1 < n && !(fl[c1] & 2)) c1++;
+        if (c2 < n && c2 <= t) { cur = c2; g_lv.nav[g_lv.nnav++] = 0x22; }
+        else if (c1 < n && c1 <= t) { cur = c1; g_lv.nav[g_lv.nnav++] = 0x1E; }
+        else { cur++; g_lv.nav[g_lv.nnav++] = 0x1A; }
+    }
+}
+// Park / unpark: PlugY's /swappage exchanges the items of two pages of the SAME stash. From the shared page you are looking at (P) with an empty far page F, one swap puts P's items into F's
+// list (where the sorter can reach them) and leaves you on P, which now shows nothing; swapping again brings back whatever is left on F. The messages are the ones /swappage sends.
+static void lv_plan_swap(int f, int toggle) {                                           // f = 1-based page number; toggle = the page you are on is in the OTHER stash (personal) than page f
+    unsigned pg = (unsigned)(f - 1); g_lv.nnav = 0; g_lv.ni = 0;
+    g_lv.nav[g_lv.nnav++] = 0x2F | (int)((pg >> 24) & 0xFF) << 8; g_lv.nav[g_lv.nnav++] = 0x30 | (int)((pg >> 16) & 0xFF) << 8;
+    g_lv.nav[g_lv.nnav++] = 0x31 | (int)((pg >> 8) & 0xFF) << 8; g_lv.nav[g_lv.nnav++] = (toggle ? 0x33 : 0x32) | (int)(pg & 0xFF) << 8;      // US_SWAP3, 2, 1, then US_SWAP0 (shared page) or US_SWAP0_TOGGLE (personal page)
+}
+#define PARK_PAGE 999                                                                    // far away: the swap creates the missing pages (PlugY leaves trailing empty pages out of the save)
+static int client_page_free(int page) {                                                 // 1 = the shared page `page` is empty on the client, or does not exist yet
+    DWORD ch = client_player(); if (!ch || !g_org_shift_spec || !readable((void *)(ch + g_org_shift_spec), 4)) return 0;
+    DWORD pd = *(DWORD *)(ch + g_org_shift_spec); if (!pd || !readable((void *)(pd + g_org_shift_py), 0x20)) return 0;
+    int n = 0; for (DWORD st = *(DWORD *)(pd + g_org_shift_py + 0x18); st && n < 3000 && readable((void *)st, 0x18); st = *(DWORD *)(st + 0x14), n++)
+        if ((int)*(DWORD *)st + 1 == page) return *(DWORD *)(st + 0x0C) == 0;
+    return 1;
+}
+static void lv_start_server(void) {
+    g_lv_client_unit = client_player(); g_lv.server_done = 0;
+    if (!g_lv_client_unit || !send_cmd(QM_CMD_LIVE, 0, g_lv.scope, g_lv.page)) { say(L"[Quartermaster] Not ready. Start or join a game first."); g_lv.state = LV_IDLE; return; }
+    g_lv.state = LV_WAIT_SERVER; g_lv.t0 = GetTickCount();
+}
+// .organize sell (and [organize] autosell): every outbox page is swapped into the page you are on in turn (PlugY's swap, as in .organize), the items that arrive in the stash grid are sold on the
+// server (srv_sell) and the pages are swapped back. An outbox page that is the open page is sold directly.
+static void sell_finish(void) {
+    LONG n = g_sell_n, gold = g_sell_gold;
+    if (n == 0 && !g_sell_full) { if (!g_lv.sell_auto && !g_sell_abort) say(L"[Quartermaster] Nothing to sell."); }
+    else say(L"[Quartermaster] Sold %ld item%ls for %ld gold%ls.", (long)n, n == 1 ? L"" : L"s", (long)gold, g_sell_full ? L". Your gold is full: the rest is still in the outbox" : L"");
+    g_lv.state = LV_IDLE;
+}
+static void sell_start(int automatic) {
+    if (!g_org_enabled || !GetModuleHandleA("PlugY.dll") || !g_org_hooked || g_org_mode != 1 || g_lv.state != LV_IDLE || !g_org_cs_ok) { if (!automatic) say(L"[Quartermaster] The stash organizer is not available."); return; }
+    int shared = 0, page = plugy_current_page(&shared);
+    if (page <= 0) { if (!automatic) say(L"[Quartermaster] I cannot tell which stash page you are looking at."); return; }
+    int lo = 0, hi = 0; EnterCriticalSection(&g_org_cs); if (org_prepare()) { lo = org_outbox_lo(g_org); hi = org_outbox_hi(g_org); } LeaveCriticalSection(&g_org_cs);
+    if (lo <= 0 || hi < lo) { if (!automatic) say(L"[Quartermaster] There is no outbox to sell (outbox is not set in quartermaster_organize.cfg)."); return; }
+    InterlockedExchange(&g_sell_n, 0); InterlockedExchange(&g_sell_gold, 0); InterlockedExchange(&g_sell_full, 0); InterlockedExchange(&g_sell_abort, 0);
+    g_lv.scope = 5; g_lv.sell_cur = lo - 1; g_lv.sell_lo = lo; g_lv.sell_hi = hi; g_lv.sell_p = page; g_lv.sell_shared = shared; g_lv.sell_auto = automatic; g_lv.prev_shared = shared; g_lv.prev_page = page;
+    logf_("sell: starting (%s), outbox pages %d-%d, you are on %s page %d", automatic ? "autosell" : "command", lo, hi, shared ? "shared" : "personal", page);
+    g_lv.state = LV_SELL_NEXT;
+}
+static void sell_send_swap(int o) { g_lv.park = o; lv_plan_swap(o, !g_lv.sell_shared); for (int i = 0; i < g_lv.nnav; i++) lv_send_plugy(g_lv.nav[i]); g_lv.ack = 0; g_lv.t0 = GetTickCount(); }
+static void sell_pump(DWORD now) {
+    if (g_lv.state == LV_SELL_NEXT) {
+        int o = 0;
+        while (++g_lv.sell_cur <= g_lv.sell_hi) {
+            int c = g_lv.sell_cur;
+            if (g_lv.sell_shared && c == g_lv.sell_p) { o = c; break; }                       // the open page itself: its items are already in the grid
+            if (!client_page_free(c)) { o = c; break; }                                       // nothing on that page: skip it
+        }
+        if (!o) { sell_finish(); return; }
+        if (g_lv.sell_shared && o == g_lv.sell_p) { g_lv.server_done = 0; if (!send_cmd(QM_CMD_LIVE, 0, 5, o)) { sell_finish(); return; } g_lv.state = LV_SELL_SERVER; g_lv.t0 = now; }
+        else { sell_send_swap(o); g_lv.state = LV_SELL_SWAP1; }
+    } else if (g_lv.state == LV_SELL_SWAP1) {
+        if (g_lv.ack) { g_lv.server_done = 0; g_lv.late_park = 0; g_lv.chk = 0; if (!send_cmd(QM_CMD_LIVE, 0, 5, g_lv.sell_cur)) { sell_send_swap(g_lv.sell_cur); g_lv.state = LV_SELL_SWAP2; return; } g_lv.state = LV_SELL_SERVER; g_lv.t0 = now; }
+        else if (now - g_lv.t0 > 10000) { g_lv.late_park = 1; g_lv.late_ack = 0; say(L"[Quartermaster] The stash did not answer; the sale was stopped."); sell_finish(); }
+    } else if (g_lv.state == LV_SELL_SERVER) {
+        if (g_lv.server_done || now - g_lv.t0 > 8000) {
+            if (!g_lv.server_done) logf_("sell: the server did not answer; swapping back anyway");
+            if (g_lv.sell_shared && g_lv.sell_cur == g_lv.sell_p) g_lv.state = LV_SELL_NEXT;
+            else { sell_send_swap(g_lv.sell_cur); g_lv.state = LV_SELL_SWAP2; }
+            if (g_sell_full || g_sell_abort) { g_lv.sell_cur = g_lv.sell_hi; }                                  // gold is full: stop after this page
+        }
+    } else if (g_lv.state == LV_SELL_SWAP2) {
+        if (g_lv.ack) g_lv.state = LV_SELL_NEXT;
+        else if (now - g_lv.t0 > 10000) { say(L"[Quartermaster] The stash did not answer while putting pages back; check your stash."); sell_finish(); }
+    }
+}
+static void live_pump(void) {                                                           // game thread, every frame
+    if (g_lv.state == LV_IDLE && g_lv.late_ack) {                                             // the park swap was answered after we gave up: put the items back
+        g_lv.late_ack = 0; g_lv.late_park = 0; lv_plan_swap(g_lv.park, !g_lv.prev_shared); g_lv.scope = 4; g_lv.state = LV_RESTORE; g_lv.next_ms = GetTickCount() + 100; g_lv.chk = 0; return; }
+    if (g_lv.state == LV_IDLE) return;
+    DWORD now = GetTickCount();
+    if (g_lv.state >= LV_SELL_NEXT) { sell_pump(now); return; }
+    if (g_lv.state == LV_WAIT_PARK) {
+        if (g_lv.ack) { g_lv.late_park = 0; lv_start_server(); }
+        else if (now - g_lv.t0 > 10000) { g_lv.late_park = 1; g_lv.late_ack = 0; say(L"[Quartermaster] The stash did not answer; nothing was changed."); g_lv.state = LV_IDLE; }
+    } else if (g_lv.state == LV_WAIT_SELF) {
+        int sh = 1, pg = plugy_current_page(&sh);
+        if (pg > 0 && !sh) lv_start_server();
+        else if (now - g_lv.t0 > 3000) { say(L"[Quartermaster] Could not switch to a personal stash page; nothing was changed."); g_lv.state = LV_IDLE; }
+    } else if (g_lv.state == LV_WAIT_AWAY) {                                              // a personal source page: its items are in its list once another personal page is open
+        int sh = 1, pg = plugy_current_page(&sh);
+        if (pg > 0 && !sh && pg != g_lv.page) lv_start_server();
+        else if (now - g_lv.t0 > 3000) { say(L"[Quartermaster] Could not switch to another personal stash page; nothing was changed."); g_lv.state = LV_IDLE; }
+    } else if (g_lv.state == LV_WAIT_SERVER) {
+        if (g_lv.server_done && g_lv.scope == 4) {                                        // bring back what is left on the parking page
+            lv_plan_swap(g_lv.park, !g_lv.prev_shared); g_lv.state = LV_RESTORE; g_lv.next_ms = now + 100; g_lv.chk = 0;
+        } else if (g_lv.server_done && g_lv.scope == 3) {                                        // back to the personal page the player was on
+            g_lv.nav[0] = g_lv.back_msg; g_lv.nnav = 1; g_lv.ni = 0; g_lv.state = LV_RESTORE; g_lv.next_ms = now + 150;
+        } else if (g_lv.server_done) {
+            if (g_lv.prev_shared) { lv_plan_nav(g_lv.prev_page); g_lv.state = LV_RESTORE; g_lv.next_ms = now + 150; } else { g_lv.state = LV_IDLE; if (g_org_autosell && g_lv.server_done == 1) sell_start(1); }
+        } else if (now - g_lv.t0 > 8000) { say(L"[Quartermaster] The stash organizer got no answer; check quartermaster.log."); g_lv.state = LV_IDLE; }
+    } else if (g_lv.state == LV_RESTORE) {
+        if ((int)(now - g_lv.next_ms) >= 0) { if (g_lv.ni < g_lv.nnav) { lv_send_plugy(g_lv.nav[g_lv.ni++]); g_lv.next_ms = now + 30; g_lv.chk = 0; } else if (!g_lv.chk) { g_lv.chk = 1; g_lv.next_ms = now + 600; } else { int sh = 0, pg = plugy_current_page(&sh); logf_("organize: finished; now on %s page %d (started on %s page %d)", sh ? "shared" : "personal", pg, g_lv.prev_shared ? "shared" : "personal", g_lv.prev_page); g_lv.state = LV_IDLE; if (g_org_autosell && g_lv.server_done == 1) sell_start(1); } }
+    }
+}
+static void do_organize(int all) {
+    if (!g_org_enabled) { say(L"[Quartermaster] The stash organizer is switched off (enabled=0 in quartermaster.ini)."); return; }
+    if (!GetModuleHandleA("PlugY.dll")) { say(L"[Quartermaster] The stash organizer needs PlugY, which is not installed."); return; }
+    if (!g_org_hooked) { say(L"[Quartermaster] The stash organizer is not attached to PlugY (see quartermaster.log)."); return; }
+    if (g_org_mode != 1) { say(L"[Quartermaster] The stash organizer is disabled in multiplayer games."); return; }          // only a game whose stash PlugY loaded through its single-player path
+    if (g_lv.state != LV_IDLE) { say(L"[Quartermaster] Still organizing; wait a moment."); return; }
+    int shared = 0, page = plugy_current_page(&shared);
+    if (page <= 0) { say(L"[Quartermaster] I cannot tell which stash page you are looking at."); return; }
+    if (!all) {
+        if (!stash_window_open()) { say(L"[Quartermaster] Open your stash first, or use \".organize scan\"."); return; }
+    }
+    g_lv.scope = all ? 1 : !shared ? 3 : 2; g_lv.page = all ? 0 : page; g_lv.prev_shared = shared; g_lv.prev_page = page; g_lv.server_done = 0;
+    if (!all) {                                                                             // the page you are looking at (shared or personal): park its items on a far shared page with PlugY's swap, sort them there, swap back what is left. You never leave the page.
+        if (!client_page_free(PARK_PAGE)) { say(L"[Quartermaster] Page %d of your shared stash is in use; I need it free to organize.", PARK_PAGE); return; }
+        logf_("organize: %s page %d: parking its items on shared page %d (you stay on this page)", shared ? "shared" : "personal", page, PARK_PAGE);
+        g_lv.scope = 4; g_lv.page = PARK_PAGE; g_lv.park = PARK_PAGE; g_lv.open_p = shared ? page : 0; g_lv.ack = 0; lv_plan_swap(PARK_PAGE, !shared);
+        for (int i = 0; i < g_lv.nnav; i++) lv_send_plugy(g_lv.nav[i]);
+        g_lv.state = LV_WAIT_PARK; g_lv.t0 = GetTickCount();
+    } else if (shared) { lv_send_plugy(0x1B); g_lv.state = LV_WAIT_SELF; g_lv.t0 = GetTickCount(); }       // .organize scan: the open shared page's items are in the inventory: PlugY puts them back in their list when a personal page is opened
+    else lv_start_server();
+}
+
 static int __stdcall h_recv(void *buf, int cap) {
     int r = o_recv(buf, cap);
+    if (g_org_cs_ok) { org_game_watch(); live_pump(); }
+    org_pending_flush();
     say_flush();
     pick_pump();
     gr_pump();
+    if (r > 1 && readable(buf, 2) && ((const unsigned char *)buf)[0] == 0x9D && ((const unsigned char *)buf)[1] == 0x18) {      // PlugY's "stash page changed / swapped" reply
+        if (g_lv.state == LV_WAIT_PARK || g_lv.state == LV_SELL_SWAP1 || g_lv.state == LV_SELL_SWAP2) g_lv.ack = 1; else if (g_lv.state == LV_IDLE && g_lv.late_park) g_lv.late_ack = 1;
+    }
+    if (InterlockedExchange(&g_key_req2, 0)) do_organize(0);
     if (InterlockedExchange(&g_key_req, 0)) do_deposit(CAT_REJUV | CAT_GEMS | CAT_RUNES | CAT_ESS | CAT_KEYS | CAT_ORGANS | CAT_SHARDS);
     if (g_grail && r > 1 && readable(buf, 2)) {                              // item action packets: 0x9d = items you own, 0x9c = world items (ignore ground add / drop / on-ground)
         const unsigned char *b = buf;
@@ -1527,8 +2003,8 @@ static int load_config(void) {            // returns [quartermaster] enabled
                   "keys=1\r\n"
                   "organs=0\r\n"
                   "shards=1\r\n"
-                  "; 1 = .deposit and the deposit key also take items from the stash (the inventory and Horadric Cube are always included), 0 = leave the stash alone\r\n"
-                  "stash=0\r\n"
+                  "; 1 = .deposit and the deposit key also take items from the stash, but only while the stash window is open (the inventory and Horadric Cube are always included), 0 = leave the stash alone\r\n"
+                  "stash=1\r\n"
                   "; 1 = .deposit, .take and the deposit key only work while you are in a town, 0 = they work anywhere\r\n"
                   "town_only=1\r\n"
                   "\r\n"
@@ -1536,10 +2012,22 @@ static int load_config(void) {            // returns [quartermaster] enabled
                   "; key that deposits everything switched on above (same as typing .deposit): a name (Insert, Delete, Home, End, PageUp,\r\n"
                   "; PageDown, F1-F12, a letter or digit), a virtual-key number, or none\r\n"
                   "deposit=Insert\r\n"
+                  "; key that organizes the shared stash page you are looking at (same as typing .organize; only while the stash is open; needs [organize] enabled=1): a name, a virtual-key number, or none\r\n"
+                  "organize=Delete\r\n"
                   "\r\n"
                   "[grail]\r\n"
                   "; Holy Grail tracker (quartermaster_grail.txt, shared by every character): 1 = track every unique and set item you find, 0 = off\r\n"
                   "enabled=1\r\n"
+                  "\r\n"
+                  "[organize]\r\n"
+                  "; stash organizer for PlugY's shared stash (the page rules are in quartermaster_organize.cfg): master switch, 1 = on, 0 = off\r\n"
+                  "enabled=1\r\n"
+                  "; 1 = every time a character loads, the items on the in-box pages are sorted into their pages (needs enabled=1)\r\n"
+                  "auto=0\r\n"
+                  "; 1 = after every .organize / .organize scan, everything in the outbox pages is sold for its vendor price (the same as typing .organize sell). Items are destroyed: leave it 0 unless you mean it\r\n"
+                  "autosell=0\r\n"
+                  "; the vendor (NPC class id) whose price list a sale uses: 154 = Charsi\r\n"
+                  "sell_vendor=154\r\n"
                   "\r\n"
                   "[cheats]\r\n"
                   "; 1 = allow .spawn CODE / .spawn unique NAME / .spawn set NAME (creates items out of nothing), 0 = off\r\n"
@@ -1549,6 +2037,10 @@ static int load_config(void) {            // returns [quartermaster] enabled
     }
     g_logging = GetPrivateProfileIntA("quartermaster", "logging", 0, path) != 0;
     g_cheat_spawn = GetPrivateProfileIntA("cheats", "spawn", 0, path) != 0;
+    g_org_enabled = GetPrivateProfileIntA("organize", "enabled", 1, path) != 0;
+    g_org_auto = GetPrivateProfileIntA("organize", "auto", 0, path) != 0;
+    g_org_autosell = GetPrivateProfileIntA("organize", "autosell", 0, path) != 0;
+    g_sell_vendor = GetPrivateProfileIntA("organize", "sell_vendor", 154, path); if (g_sell_vendor < 1 || g_sell_vendor > 800) g_sell_vendor = 154;
     g_grail = GetPrivateProfileIntA("grail", "enabled", 1, path) != 0;
     g_st_rejuv = GetPrivateProfileIntA("storage", "rejuv", 1, path) != 0;
     g_st_gems = GetPrivateProfileIntA("storage", "gems", 1, path) != 0;
@@ -1557,9 +2049,9 @@ static int load_config(void) {            // returns [quartermaster] enabled
     g_st_keys = GetPrivateProfileIntA("storage", "keys", 1, path) != 0;
     g_st_organs = GetPrivateProfileIntA("storage", "organs", 0, path) != 0;
     g_st_shards = GetPrivateProfileIntA("storage", "shards", 1, path) != 0;
-    g_st_stash = GetPrivateProfileIntA("storage", "stash", 0, path) != 0;
+    g_st_stash = GetPrivateProfileIntA("storage", "stash", 1, path) != 0;
     g_town_only = GetPrivateProfileIntA("storage", "town_only", 1, path) != 0;
-    { char kb[32]; GetPrivateProfileStringA("keys", "deposit", "Insert", kb, sizeof kb, path); g_key_deposit = parse_key(kb); }
+    { char kb[32]; GetPrivateProfileStringA("keys", "deposit", "Insert", kb, sizeof kb, path); g_key_deposit = parse_key(kb); GetPrivateProfileStringA("keys", "organize", "Delete", kb, sizeof kb, path); g_key_organize = parse_key(kb); }
     return GetPrivateProfileIntA("quartermaster", "enabled", 1, path) != 0;
 }
 
@@ -1601,6 +2093,7 @@ static DWORD WINAPI worker(LPVOID arg) {
     logf_("hook recv (IAT D2Client->D2Net#%u): %d", recv_ord, hook_import_ordinal(client, "D2Net.dll", recv_ord, h_recv, (void **)&o_recv));
     CreateThread(NULL, 0, patch_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, key_thread, NULL, 0, NULL);
+    CreateThread(NULL, 0, org_thread, NULL, 0, NULL);
     logf_("storage: rejuv=%d gems=%d runes=%d essences=%d keys=%d organs=%d shards=%d stash=%d town_only=%d, deposit key=%d", g_st_rejuv, g_st_gems, g_st_runes, g_st_ess, g_st_keys, g_st_organs, g_st_shards, g_st_stash, g_town_only, g_key_deposit);
     return 0;
 }

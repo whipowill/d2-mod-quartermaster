@@ -12,6 +12,7 @@ reset.sh
 build/*
 !build/quartermaster.dll
 !build/quartermaster.ini
+!build/quartermaster_organize.cfg
 
 # runtime logs and editor junk
 *.log

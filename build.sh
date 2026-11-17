@@ -8,7 +8,8 @@ TOOLS="$PWD/.tools"
 export PYTHONPATH="$TOOLS"
 mkdir -p build .out
 ZIG="python3 -m ziglang cc -target x86-windows-gnu -O2 -Wall"
-$ZIG -shared -o .out/quartermaster.dll src/quartermaster.c
+$ZIG -shared -o .out/quartermaster.dll src/quartermaster.c src/organize.c src/organize_live.c
 cp .out/quartermaster.dll build/quartermaster.dll   # build/ holds only the deliverables; intermediates live in .out/
 cp src/quartermaster.ini build/quartermaster.ini
-echo "built: build/quartermaster.dll build/quartermaster.ini"
+cp src/quartermaster_organize.cfg build/quartermaster_organize.cfg
+echo "built: build/quartermaster.dll build/quartermaster.ini build/quartermaster_organize.cfg"
