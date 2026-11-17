@@ -12,17 +12,17 @@ A mod for Diablo II that adds a chat command storage system. The idea is to inte
 
 ## Features
 
-- **Chat Store** - enter a command to send common items to storage
-- **PlugY Organizer** - enter a command to send gear straight to shared stash (**EXPERIMENTAL**))
-- **Holy Grail** - track of your progress on the Holy Grail quest
+- **Virtual Bank** - enter a command to send common items to an account-wide virtual bank
+- **PlugY Organizer** - enter a command to instantly organize all your gear in the shared stash
+- **Holy Grail** - track your progress as you discover new items on your Holy Grail quest
 
 ## Usage
 
-This mod is intended to make storing common items a lot easier:
+The chat storage system takes potions, gems, runes, and endgame items:
 
-- ``.deposit`` - moves all storable items into the quartermaster bank
-- ``.take <NAME> <AMOUNT>`` - retreive items from the quartermaster bank
-- ``.storage`` - shows what is stored currently in the quartermaster bank
+- ``.deposit`` - moves all storable items into the virtual bank
+- ``.take <NAME> <AMOUNT>`` - retreive items from the virtual bank
+- ``.storage`` - shows what is stored currently in the virtual bank
 - ``.storage [potions|gems|runes|essences|keys|organs|shards]`` - shows what you have in that category
 
 Pressing the ``Insert`` key will perform the same action as the ``.deposit`` command.
