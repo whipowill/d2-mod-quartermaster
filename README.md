@@ -41,10 +41,12 @@ The mod is forgiving on the shorthand names you can pass:
 
 ### PlugY Organizer
 
+**THIS FEATURE IS EXPERIMENTAL! MAKE BACKUPS OF YOUR SAVE FILES.**
+
 The shared stash auto-organizer is controlled by a [configuration file](build/quartermaster_organize.cfg) designed around an [organization concept](ORGANIZATION.md).
 
 - ``.organize`` - will take items on the current page and organize them
-- ``.organize scan`` - will re-organize scan items in the entire shared stash
+- ``.organize scan`` - will re-organize all items in the entire shared stash
 - ``.organize sell`` - will sell all the duplicate items in the "outbox" page rages (default 20-29)
 
 Pressing the ``Delete`` key will perform the same action as the ``.organize`` command.
