@@ -258,7 +258,7 @@ typedef struct {
     int nchild;                     // socketed children following this record
     int first_child;                // index of first child record
     char key[56];
-    int simple, ear, socketed, props_ok, nprop; short pid[40]; int ppar[40]; int pval[40];
+    int simple, ear, unid, socketed, props_ok, nprop; short pid[40]; int ppar[40]; int pval[40];
 } item_t;
 
 typedef struct { unsigned flags; char name[24]; int count; size_t start, end; } page_t;
@@ -292,7 +292,7 @@ static int parse_head(const org_ctx *c, const unsigned char *p, size_t len, item
     if (ver < 99 || ver > 106 || mode > 6) return 0;
     it->top = mode != 6; RD(4); it->col = (int)RD(4); it->row = (int)RD(4); (void)RD(3);
     it->eth = (flags & 0x400000) != 0; it->rw = (flags & 0x4000000) != 0;
-    it->cls = NULL; it->q = 0; it->quality = 0; it->nchild = 0; it->sock = 0; it->clvl = 0; it->uniq = it->setid = it->pre = it->suf = -1; for (int i = 0; i < 6; i++) it->aff[i] = 0;
+    it->cls = NULL; it->unid = 0; it->q = 0; it->quality = 0; it->nchild = 0; it->sock = 0; it->clvl = 0; it->uniq = it->setid = it->pre = it->suf = -1; for (int i = 0; i < 6; i++) it->aff[i] = 0;
     if (flags & 0x10000) { it->ear = 1; return 1; }                           // an ear: stays where it is
     char code[5]; for (int i = 0; i < 4; i++) code[i] = (char)RD(8); code[4] = 0;
     it->cls = find_cls(c, code);
@@ -300,6 +300,7 @@ static int parse_head(const org_ctx *c, const unsigned char *p, size_t len, item
     it->nchild = (int)RD(simple ? 1 : 3);
     if (!it->cls) return 1;
     it->w = it->cls->w; it->h = it->cls->h;
+    it->unid = !simple && !(flags & 0x10);                                 // not identified: stays exactly where it is (every stage skips it, like an ear)
     if (simple) { it->q = Q_NORMAL; it->quality = 2; return 1; }
     RD(32); it->ilvl = (int)RD(7); unsigned q = RD(4); it->quality = (int)q;
     if (RD(1)) RD(3);
@@ -415,7 +416,7 @@ static int in_outbox(const org_ctx *c, int page) { return c->rej_lo > 0 && page 
 static int in_untouched(const org_ctx *c, int page) { if (c->blocked_page > 0 && page == c->blocked_page) return 1; for (int i = 0; i < c->nuntouched; i++) if (page >= c->untouched[i].lo && page <= c->untouched[i].hi) return 1; return 0; }
 static int rule_for(const org_ctx *c, const item_t *it, int *setpage) {
     *setpage = 0;
-    if (!it->cls || !it->top) return -1;
+    if (!it->cls || it->unid || !it->top) return -1;
     if (it->q == Q_SET && it->setid >= 0 && it->setid < c->nset) {                       // set items go to the page of their set
         for (int i = 0; i < c->nsetpage; i++) if (ieq(c->setpage[i].name, c->set[it->setid].set)) { *setpage = c->setpage[i].page; return -2; }
     }
@@ -466,12 +467,12 @@ static unsigned char *occ_of(occmap_t *m, int page, int gx, int gy) { return m->
 
 // duplicates: which items are judged at all
 static int dup_eligible(const org_ctx *c, const item_t *it) {
-    if (!it->top || !it->cls || !(it->q & c->dup_q) || !it->props_ok || in_untouched(c, it->page) || in_outbox(c, it->page)) return 0;
+    if (!it->top || !it->cls || it->unid || !(it->q & c->dup_q) || !it->props_ok || in_untouched(c, it->page) || in_outbox(c, it->page)) return 0;
     if (c->dup_skip_sock && (it->socketed || it->sock > 0)) return 0;
     for (int k = 0; k < c->ndup_skip; k++) if (type_dist_r(c, it->cls->type, c->dup_skip[k], 0) >= 0) return 0;
     return it->q == Q_UNIQUE ? it->uniq >= 0 : it->q == Q_SET ? it->setid >= 0 : 0;
 }
-static int dup_same(const item_t *a, const item_t *b) { return a->q == b->q && (a->q == Q_UNIQUE ? a->uniq == b->uniq : a->setid == b->setid); }
+static int dup_same(const item_t *a, const item_t *b) { return a->q == b->q && a->eth == b->eth && (a->q == Q_UNIQUE ? a->uniq == b->uniq : a->setid == b->setid); }
 static const org_ctx *dup_c; static const item_t *dup_items; static const double *dup_score;
 static int dup_cmp(const void *A, const void *B) {          // best first; equal scores are told apart by the saved bytes, not by position
     int x = *(const int *)A, y = *(const int *)B; double sx = dup_score[x], sy = dup_score[y];
@@ -504,7 +505,7 @@ static int sort_once(org_ctx *c, const unsigned char *in, size_t n, int scope, i
     for (int i = 0; i < s.nit; i++) { item_t *it = &s.it[i]; if (it->top) { it->rule = rule_for(c, it, &setp[i]); } }
     // who is an arrival
     unsigned char *arr = (unsigned char *)calloc((size_t)s.nit + 1, 1);
-    for (int i = 0; i < s.nit; i++) { item_t *it = &s.it[i]; if (!it->top || !it->cls || in_untouched(c, it->page) || in_outbox(c, it->page)) continue;
+    for (int i = 0; i < s.nit; i++) { item_t *it = &s.it[i]; if (!it->top || !it->cls || it->unid || in_untouched(c, it->page) || in_outbox(c, it->page)) continue;
         int inscope = scope == ORG_ALL ? 1 : scope == ORG_PAGE ? it->page == page : (it->page >= c->inbox_lo && it->page <= c->inbox_hi);
         if (!inscope) continue;
         if (getenv("ORG_DEBUG")) sb_line(&rep, "  p%d %s q=%u type=%s rule=%d (%s) clvl=%d rw=%d name=[%s] sock=%d/%d", it->page, it->cls->code, it->q, it->cls->type, it->rule, it->rule >= 0 ? c->rule[it->rule].name : it->rule == -2 ? "set page" : "none", it->clvl, it->rw, it->key, it->sock, it->socketed);
@@ -616,13 +617,13 @@ static int sort_once(org_ctx *c, const unsigned char *in, size_t n, int scope, i
     if (scope != ORG_PAGE) {
         for (int pg2 = c->inbox_lo + 1; pg2 <= c->inbox_hi && pg2 <= maxpage; pg2++) { if (in_untouched(c, pg2)) continue;
             for (int rowi = 0; rowi < gy; rowi++) for (int coli = 0; coli < gx; coli++)
-                for (int i = 0; i < s.nit; i++) { item_t *it = &s.it[i]; if (!it->top || !it->cls || it->moved || it->page != pg2 || it->row != rowi || it->col != coli) continue;
+                for (int i = 0; i < s.nit; i++) { item_t *it = &s.it[i]; if (!it->top || !it->cls || it->unid || it->moved || it->page != pg2 || it->row != rowi || it->col != coli) continue;
                     for (int t = c->inbox_lo; t < pg2; t++) { if (in_untouched(c, t)) continue; unsigned char *o = occ_of(&om, t, gx, gy); int x, y;
                         if (find_spot(o, gx, gy, it->w, it->h, &x, &y)) { mark(o, gx, x, y, it->w, it->h, 1); unsigned char *o0 = occ_of(&om, it->page, gx, gy); mark(o0, gx, it->col, it->row, it->w, it->h, 0);
                             it->destpage = t; it->col = x; it->row = y; it->moved = 1; nfront++; break; } } }
         }
     }
-    for (int i = 0; i < s.nit; i++) { item_t *it = &s.it[i]; if (!it->top || !it->cls || in_untouched(c, it->page)) continue;
+    for (int i = 0; i < s.nit; i++) { item_t *it = &s.it[i]; if (!it->top || !it->cls || it->unid || in_untouched(c, it->page)) continue;
         int inscope = scope == ORG_PAGE ? it->page == page : (it->page >= c->inbox_lo && it->page <= c->inbox_hi); if (!inscope) continue;
         if (!it->moved && it->rule != -1) {                                      // an item that is already in its block (or came from a page of it) is home, not "unplaced"
             int hl, hh; if (it->rule == -2) hl = hh = setp[i]; else { hl = c->rule[it->rule].lo; hh = c->rule[it->rule].hi; }
@@ -662,7 +663,7 @@ static int sort_once(org_ctx *c, const unsigned char *in, size_t n, int scope, i
     else if (!nfront) sb_line(&rep, "Nothing to organize.");
     if (nfront && !nmove && !nrel) sb_line(&rep, "Organized: packed %d item(s) toward the front of the in-box.", nfront);
     c->st_moved = *moved; c->st_unplaced = nleft; c->st_lo = c->st_hi = 0; c->st_out = nout; c->st_scope = scope; c->st_page = page;
-    for (int i = 0; i < s.nit; i++) { item_t *it = &s.it[i]; if (!it->top || !it->cls || in_untouched(c, it->page)) continue;
+    for (int i = 0; i < s.nit; i++) { item_t *it = &s.it[i]; if (!it->top || !it->cls || it->unid || in_untouched(c, it->page)) continue;
         int inscope = scope == ORG_PAGE ? it->page == page : (it->page >= c->inbox_lo && it->page <= c->inbox_hi); if (!inscope) continue;
         int pg3 = it->moved ? it->destpage : it->page; if (!c->st_lo || pg3 < c->st_lo) c->st_lo = pg3; if (pg3 > c->st_hi) c->st_hi = pg3; }
     if (nleft && scope != ORG_PAGE) sb_line(&rep, "%d item(s) could not be placed and stay in the in-box (pages %d-%d).", nleft, c->inbox_lo, c->inbox_hi);

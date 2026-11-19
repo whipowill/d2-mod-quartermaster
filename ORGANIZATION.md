@@ -9,7 +9,7 @@ These are the rules in the shipped `quartermaster_organize.cfg`. Edit that file 
 | 1-9 | **Untouched.** Your hand-managed pages. The sorter never reads, moves from or moves onto them. | not sorted |
 | 10-19 | **Inbox.** Put new items here; the sorter empties it into the pages below. Items that cannot be placed stay here, packed toward the front. | not sorted |
 | 20-29 | **Outbox.** Surplus copies of uniques and sets (see Duplicates) are moved here, filled from page 20 forward. | not sorted |
-| 30-39 | Jewels | backload |
+| 30-39 | Jewels. Unique jewels go to the front pages, all other jewels are backloaded from the last page. | frontload / backload |
 | 40-49 | Rings. Unique rings go to the front pages, all other rings are backloaded from the last page. | frontload / backload |
 | 50-59 | Amulets. Same arrangement as rings. | frontload / backload |
 | 60-69 | Small charms | backload |
@@ -20,6 +20,8 @@ These are the rules in the shipped `quartermaster_organize.cfg`. Edit that file 
 | 200-299 | **Uniques**, ten pages per kind | sorted by required level, then name |
 | 300-331 | **Set items**, one page per set (list below) | placed on the set's page |
 | 400-499 | **Runewords**, ten pages per kind. The white and superior bases for runewords share these pages: the finished runewords fill a block from its first page forward and the bases are backloaded from its last page backward, so the two meet in the middle. | sorted / backload |
+
+**Unidentified items are never moved.** They stay on whatever page and square they are on, whatever rule would otherwise apply, and still block their squares.
 
 Pages 332-399 and everything above 499 are not used by any rule. Page 999 is used briefly by `.organize` (see "Commands").
 
@@ -67,7 +69,7 @@ The set names are the names in the "set" column of `SetItems.txt`, not the names
 
 - **sorted** (the default): the whole block is laid out again in order every time, so it always stays in order. The order is required character level, then name.
 - **backload**: for things that cannot be put in a meaningful order (charms, jewels, rings). New items go onto the last page of the block that has room (page 69, then 68, and so on) and nothing already in the block is ever moved. You move the good ones to the front pages by hand.
-- **frontload**: the same, but new items go onto the first page of the block that has room. Used for unique rings and amulets, which share their pages with the backloaded rest, so the two fill toward each other.
+- **frontload**: the same, but new items go onto the first page of the block that has room. Used for unique jewels, rings and amulets, which share their pages with the backloaded rest, so the two fill toward each other.
 
 With `packing = tight` (the default), no hole is left that a later item could fill: if the next item does not fit on a page, up to `lookahead = 25` items further down the list may be pulled forward. Required-level order is therefore followed generally, not to the square. Set `packing = strict` for exact order at the cost of some gaps.
 
@@ -75,6 +77,7 @@ With `packing = tight` (the default), no hole is left that a later item could fi
 
 Only **unique and set** items are checked (`duplicates_apply`). Runewords, bases, rares and magic items never are.
 
+- Ethereal and non-ethereal copies of an item are counted separately (3 of each).
 - At most `max_copies = 3` of the same unique or set item are kept in the sorted pages. The best copies are kept, judged by where each rolled stat sits between the lowest and highest value among your copies. Surplus copies are moved to the outbox (pages 20-29).
 - **Exempt types** (`duplicates_skip`): rings, amulets, charms, jewels, gems and runes. You may keep as many of these as you like.
 - **Socketed items** (`duplicates_skip_socketed = 1`): an item with any sockets, empty or filled, is never judged, is never sent to the outbox, and does not count toward the 3 copies.
