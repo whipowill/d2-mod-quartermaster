@@ -21,7 +21,7 @@ A mod for Diablo II that adds a chat command storage system. The idea is to inte
 The chat storage system takes potions, gems, runes, and endgame items:
 
 - ``.deposit`` - moves all storable items into the virtual bank
-- ``.take <NAME> <AMOUNT>`` - retreive items from the virtual bank
+- ``.take <NAME> [AMOUNT]`` - retreive items from the virtual bank (no amount = 1)
 - ``.storage`` - shows what is stored currently in the virtual bank
 - ``.storage [potions|gems|runes|essences|keys|organs|shards]`` - shows what you have in that category
 
@@ -29,7 +29,7 @@ Pressing the ``Insert`` key will perform the same action as the ``.deposit`` com
 
 ### Examples
 
-The mod is forgiving on the shorthand names you can pass:
+The mod is flexible on the shorthand names you can pass (the full list of words is in [SHORTHAND.md](SHORTHAND.md)):
 
 ```
 .take rejuv 10
@@ -37,7 +37,12 @@ The mod is forgiving on the shorthand names you can pass:
 .take shael 1
 .take cham rune 1
 .take perfect skull 1
+.take rejuv
+.take e3
+.take k1 2
 ```
+
+The four essences are ``e1`` (Twisted), ``e2`` (Charged), ``e3`` (Burning) and ``e4`` (Festering); the three Pandemonium keys are ``k1`` (Terror), ``k2`` (Hate) and ``k3`` (Destruction). Essences also answer to ``twisted essence``, ``suffering essence`` or ``essence of terror``, and keys to ``key of hate`` or ``hate key``; the word "essence" or "key" is always required.
 
 ### PlugY Organizer
 

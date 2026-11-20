@@ -1,5 +1,5 @@
 // quartermaster.dll - Diablo II (stock LoD 1.13d) chat-command item storage ("quartermaster"), single player.
-// Commands: .deposit [rejuv|gems|runes], .take ITEM AMOUNT (alias .withdraw), .storage, .lookup WORDS (alias .find), .scan (diagnostic) and the
+// Commands: .deposit [rejuv|gems|runes], .take ITEM [AMOUNT] (alias .withdraw; no amount = 1), .storage, .lookup WORDS (alias .find), .scan (diagnostic) and the
 // cheat .spawn (off unless [cheats] spawn=1). The deposit key (default Insert) does the same as .deposit. See CLAUDE.md (summary) and NOTES.md (engineering notes).
 //
 //   - send hook:    inline detour of D2Net SendPacket(size, arg, packet). Order-independent with qol.dll, which hooks the same
@@ -169,7 +169,7 @@ static void store_add(store_t *st, DWORD code, int k) {
 
 // Gem and rune codes and names come from the game's own Misc.txt (type "rune"; types gema/gemd/geme/gemr/gems/gemt/gemz). Jewels are
 // not included (they carry properties). Loaded on the client thread before a command is sent; the server thread only reads them.
-typedef struct { char code[4]; char name[32]; char type[5]; } mitem_t;      // type = Misc.txt type (gem families gema/gemd/...; "rune")
+typedef struct { char code[4]; char name[48]; char type[5]; } mitem_t;      // type = Misc.txt type (gem families gema/gemd/...; "rune")
 static mitem_t g_gems[64], g_runes[64], g_ess[16], g_keys[8], g_organs[8], g_shards[4]; static int g_ngems, g_nrunes, g_ness, g_nkeys, g_norgans, g_nshards, g_misc_state;      // state: 0 = not loaded, 1 = loaded, -1 = failed
 static int ci_has(const char *hay, const char *needle) { size_t nl = strlen(needle); for (; *hay; hay++) if (!_strnicmp(hay, needle, nl)) return 1; return 0; }
 static int parse_misc_cb(const char *txt, int len) {
@@ -207,6 +207,7 @@ static int parse_misc_cb(const char *txt, int len) {
                     memset(m->code, ' ', 4);
                     for (int k = 0; code[k]; k++) m->code[k] = (code[k] >= 'A' && code[k] <= 'Z') ? (char)(code[k] + 32) : code[k];
                     snprintf(m->name, sizeof m->name, "%s", name);
+                    { char *sx = strstr(m->name, "Essense"); if (sx) sx[5] = 'c'; }                       // the game's Misc.txt spells it "Charged Essense of Hatred" (the in-game text is right): read it as "Essence"
                     snprintf(m->type, sizeof m->type, "%s", type);
                     size_t nl = strlen(m->name);
                     if (!_stricmp(type, "rune") && nl > 5 && !_stricmp(m->name + nl - 5, " Rune")) m->name[nl - 5] = 0;   // "El Rune" -> "El"
@@ -1342,6 +1343,46 @@ static void gr_pump(void) {                                                   //
 }
 
 // Returns 1 if the typed line was one of our commands (it is then not sent to the server).
+// .take: what an item name, code or alias means. 1 = found (*outcode set), 0 = unknown, 2 = refused (the reason was already said).
+static int take_resolve(const char *item, DWORD *outcode) {
+    DWORD code = 0; int found = 0;
+    if (!_stricmp(item, "rejuv") || !_stricmp(item, "rejuvenation") || !_stricmp(item, "potion") || !_stricmp(item, "potions") || !_stricmp(item, "rvl")) {
+        if (!g_st_rejuv) { say(L"[Quartermaster] Potion storage is not allowed."); return 2; }
+        found = 1;
+    } else if (misc_load()) {
+        for (int k = 0; k < 6 && !found; k++) {                                  // gems, runes, essences, keys, organs, shards
+            const mitem_t *arr = k == 1 ? g_runes : k == 2 ? g_ess : k == 3 ? g_keys : k == 4 ? g_organs : k == 5 ? g_shards : g_gems; int cnt = k == 1 ? g_nrunes : k == 2 ? g_ness : k == 3 ? g_nkeys : k == 4 ? g_norgans : k == 5 ? g_nshards : g_ngems;
+            if (!kind_enabled(k)) continue;
+            for (int i = 0; i < cnt && !found; i++) {
+                char full[64]; snprintf(full, sizeof full, "%s Rune", arr[i].name);
+                char cc[5]; memcpy(cc, arr[i].code, 4); cc[4] = 0; for (int z = 3; z > 0 && cc[z] == ' '; z--) cc[z] = 0;
+                const char *of = strstr(arr[i].name, " of "), *es = strstr(arr[i].name, "Essen");        // "Burning Essence of Terror": also "burning", "terror" and "essence of terror"
+                int hit = !_stricmp(item, cc) || !_stricmp(item, arr[i].name) || (k == 1 && !_stricmp(item, full));
+                if (k == 2) { char sn[24]; ess_short(&arr[i], sn, sizeof sn);                                                               // (the bare adjective, "twisted", is not a word any more: an essence needs "essence")
+                    { char ad[64]; snprintf(ad, sizeof ad, "%s Essence", sn); if (!_stricmp(item, ad)) hit = 1; snprintf(ad, sizeof ad, "%s Essense", sn); if (!_stricmp(item, ad)) hit = 1;     // "twisted essence" (and the table's own misspelling)
+                      if (of) { snprintf(ad, sizeof ad, "Essence of %s", of + 4); if (!_stricmp(item, ad)) hit = 1; snprintf(ad, sizeof ad, "Essense of %s", of + 4); if (!_stricmp(item, ad)) hit = 1;     // either spelling of "essence of hatred"
+                        snprintf(ad, sizeof ad, "%s Essence", of + 4); if (!_stricmp(item, ad)) hit = 1; snprintf(ad, sizeof ad, "%s Essense", of + 4); if (!_stricmp(item, ad)) hit = 1; } }   // "suffering essence", "terror essence"
+                    const char *eo[4] = {"tes", "ceh", "bet", "fed"}; for (int z = 0; z < 4; z++) if (!_stricmp(cc, eo[z])) { char sc[3] = {'e', (char)('1' + z), 0}; if (!_stricmp(item, sc)) hit = 1; } }       // shorthand e1..e4: Twisted (suffering), Charged (hatred), Burning (terror), Festering (destruction)
+                if (k == 2 && es && !_stricmp(item, es)) hit = 1;                                                   // "Essence of Suffering" (the table's own spelling of the second one is "Essense"); the bare noun ("suffering") is not a word any more
+                if (k == 3) {                                                                                   // "terror", "key of terror", "key 1", "pandemonium key 1"
+                    char sn[24], al[48]; key_short(&arr[i], sn, sizeof sn);
+                    snprintf(al, sizeof al, "Key of %s", sn);
+                    char d[8]; snprintf(d, sizeof d, "%c", arr[i].name[strlen(arr[i].name) - 1]);
+                    char al2[16]; snprintf(al2, sizeof al2, "Key %s", d);
+                    char al4[40]; snprintf(al4, sizeof al4, "%s Key", sn);                                       // "terror key", "hate key"
+                    if (!_stricmp(item, al4)) hit = 1;
+                    char al3[3] = {'k', d[0], 0};                                                                // shorthand k1..k3 (same digit as "Key 1")
+                    if (!_stricmp(item, al) || !_stricmp(item, al2) || !_stricmp(item, al3)) hit = 1;        // a key needs "key" (or kN): the bare "terror" / "hate" / "destruction" are not words any more
+                }
+                if (k == 4) { char sn[24]; organ_short(&arr[i], sn, sizeof sn); if (!_stricmp(item, sn)) hit = 1; }          // "horn", "eye", "brain"
+                if (k == 5 && (!_stricmp(item, "shard") || !_stricmp(item, "shards") || !_stricmp(item, "world stone") || !_stricmp(item, "worldstone"))) hit = 1;      // shorthand
+                if (hit) { code = *(DWORD *)arr[i].code; found = 1; }
+            }
+        }
+    }
+    *outcode = code; return found;
+}
+
 static int qm_command(const char *text) {
     int i = 0;
     while (text[i] == ' ') i++;
@@ -1431,46 +1472,24 @@ static int qm_command(const char *text) {
             else { say(L"[Quartermaster] Usage: .deposit [rejuv|gems|runes|essences|keys|organs|shards]"); return 1; }
         }
         do_deposit(mask);
-    } else if (!strcmp(word, "withdraw")) {                               // .withdraw ITEM AMOUNT   (both required; there is no "all")
-        const char *e = args + strlen(args);
-        while (e > args && e[-1] == ' ') e--;
-        const char *q = e;
-        while (q > args && q[-1] != ' ') q--;
-        if (q == args || !(*q >= '0' && *q <= '9')) { say(L"[Quartermaster] Usage: .take ITEM AMOUNT   e.g. .take rejuv 5   or   .take r12 2"); return 1; }
-        int count = atoi(q);
-        char item[48]; int il = (int)(q - args);
-        while (il > 0 && args[il - 1] == ' ') il--;
-        if (il > 47) il = 47;
-        memcpy(item, args, (size_t)il); item[il] = 0;
-        if (count < 1) { say(L"[Quartermaster] The amount must be at least 1."); return 1; }
-        if (count > 255) count = 255;
-        DWORD code = 0; int found = 0;
-        if (!_stricmp(item, "rejuv") || !_stricmp(item, "rejuvenation") || !_stricmp(item, "potion") || !_stricmp(item, "potions") || !_stricmp(item, "rvl")) {
-            if (!g_st_rejuv) { say(L"[Quartermaster] Potion storage is not allowed."); return 1; }
-            found = 1;
-        } else if (misc_load()) {
-            for (int k = 0; k < 6 && !found; k++) {                                  // gems, runes, essences, keys, organs, shards
-                const mitem_t *arr = k == 1 ? g_runes : k == 2 ? g_ess : k == 3 ? g_keys : k == 4 ? g_organs : k == 5 ? g_shards : g_gems; int cnt = k == 1 ? g_nrunes : k == 2 ? g_ness : k == 3 ? g_nkeys : k == 4 ? g_norgans : k == 5 ? g_nshards : g_ngems;
-                if (!kind_enabled(k)) continue;
-                for (int i = 0; i < cnt && !found; i++) {
-                    char full[64]; snprintf(full, sizeof full, "%s Rune", arr[i].name);
-                    char cc[5]; memcpy(cc, arr[i].code, 4); cc[4] = 0; for (int z = 3; z > 0 && cc[z] == ' '; z--) cc[z] = 0;
-                    const char *of = strstr(arr[i].name, " of "), *es = strstr(arr[i].name, "Essen");        // "Burning Essence of Terror": also "burning", "terror" and "essence of terror"
-                    int hit = !_stricmp(item, cc) || !_stricmp(item, arr[i].name) || (k == 1 && !_stricmp(item, full));
-                    if (k == 2) { char sn[24]; ess_short(&arr[i], sn, sizeof sn); if (!_stricmp(item, sn)) hit = 1; }
-                    if (k == 2 && of && (!_stricmp(item, of + 4) || (es && !_stricmp(item, es)))) hit = 1;
-                    if (k == 3) {                                                                                   // "terror", "key of terror", "key 1", "pandemonium key 1"
-                        char sn[24], al[48]; key_short(&arr[i], sn, sizeof sn);
-                        snprintf(al, sizeof al, "Key of %s", sn);
-                        char d[8]; snprintf(d, sizeof d, "%c", arr[i].name[strlen(arr[i].name) - 1]);
-                        char al2[16]; snprintf(al2, sizeof al2, "Key %s", d);
-                        if (!_stricmp(item, sn) || !_stricmp(item, al) || !_stricmp(item, al2)) hit = 1;
-                    }
-                    if (k == 4) { char sn[24]; organ_short(&arr[i], sn, sizeof sn); if (!_stricmp(item, sn)) hit = 1; }          // "horn", "eye", "brain"
-                    if (k == 5 && (!_stricmp(item, "shard") || !_stricmp(item, "shards") || !_stricmp(item, "world stone") || !_stricmp(item, "worldstone"))) hit = 1;      // shorthand
-                    if (hit) { code = *(DWORD *)arr[i].code; found = 1; }
-                }
-            }
+    } else if (!strcmp(word, "withdraw")) {                               // .take ITEM [AMOUNT]   (no amount = 1; there is no "all")
+        const char *s = args; while (*s == ' ') s++;
+        const char *e = args + strlen(args); while (e > s && e[-1] == ' ') e--;
+        if (e == s) { say(L"[Quartermaster] Usage: .take ITEM [AMOUNT]   e.g. .take rejuv 5   or   .take r12"); return 1; }
+        const char *q = e; while (q > s && q[-1] != ' ') q--;                                    // the last word
+        int count = 1, found = 0; char item[48]; DWORD code = 0;
+        if (q > s && *q >= '0' && *q <= '9') {                                                    // "ITEM AMOUNT"
+            int il = (int)(q - s); while (il > 0 && s[il - 1] == ' ') il--; if (il > 47) il = 47;
+            memcpy(item, s, (size_t)il); item[il] = 0;
+            count = atoi(q);
+            if (count < 1) { say(L"[Quartermaster] The amount must be at least 1."); return 1; }
+            if (count > 255) count = 255;
+            int r = take_resolve(item, &code); if (r == 2) return 1; found = r;
+        }
+        if (!found) {                                                                              // no amount (or the number is part of the name, like "key 1"): the whole text is the item, the amount is 1
+            int il = (int)(e - s); if (il > 47) il = 47;
+            memcpy(item, s, (size_t)il); item[il] = 0; count = 1;
+            int r = take_resolve(item, &code); if (r == 2) return 1; found = r;
         }
         if (!found) { say(L"[Quartermaster] I don't know '%.30hs'. Try a code like r12, a name, or rejuv.", item); return 1; }
         if (!send_cmd(QM_CMD_TAKE, code, count, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
