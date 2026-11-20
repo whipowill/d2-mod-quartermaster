@@ -34,15 +34,10 @@ The mod is flexible on the shorthand names you can pass (the full list of words 
 ```
 .take rejuv 10
 .take potion 5
-.take shael 1
-.take cham rune 1
-.take perfect skull 1
-.take rejuv
-.take e3
-.take k1 2
+.take shael
+.take cham rune
+.take perfect skull 2
 ```
-
-The four essences are ``e1`` (Twisted), ``e2`` (Charged), ``e3`` (Burning) and ``e4`` (Festering); the three Pandemonium keys are ``k1`` (Terror), ``k2`` (Hate) and ``k3`` (Destruction). Essences also answer to ``twisted essence``, ``suffering essence`` or ``essence of terror``, and keys to ``key of hate`` or ``hate key``; the word "essence" or "key" is always required.
 
 ### PlugY Organizer
 
