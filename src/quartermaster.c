@@ -1761,8 +1761,9 @@ static void srv_live(DWORD game, DWORD player, int scope, int page) {
         ok = lv_run(&mem, g_org, g_org_shift_spec, g_org_shift_py, (uint32_t)player, (uint32_t)g_lv_client_unit, scope == 1 ? ORG_ALL : ORG_PAGE, scope == 3 ? 0 : page, gx, gy, scope == 3 ? page : 0, scope == 4 ? g_lv.open_p : 0, &r);
     } else snprintf(r.err, sizeof r.err, "the rules file could not be read");
     if (ok) {
-        char sm[600]; org_summary(g_org, sm, sizeof sm); logf_("organize (live): %d item(s) moved; %s", r.moved, sm); if (r.parse[0]) logf_("organize (live): %s", r.parse); if (r.detail[0]) logf_("organize (live) details:\n%s", r.detail);
+        char sm[600]; org_summary(g_org, sm, sizeof sm); logf_("organize (live): scope %d page %d: %d item(s) moved, %d sent to the shared stash, %d stayed on the personal page; %s", scope, page, r.moved, r.imported, r.stayed, sm); if (r.parse[0]) logf_("organize (live): %s", r.parse); if (r.detail[0]) logf_("organize (live) details:\n%s", r.detail);
         if (scope == 3) org_summary_ex(g_org, r.imported, r.stayed, sm, sizeof sm);
+        else if (scope == 4) org_summary_parked(g_org, g_lv.open_p == 0, sm, sizeof sm);       // open_p = 0: the parked items belong to the personal page
         for (char *line = sm; *line;) { char *nl = strchr(line, '\n'); if (nl) *nl = 0; if (*line) say(L"[Quartermaster] %hs", line); if (!nl) break; line = nl + 1; }
     } else { logf_("organize (live): not done: %s", r.err); say(L"[Quartermaster] The stash could not be organized: %hs", r.err); }
     LeaveCriticalSection(&g_org_cs);

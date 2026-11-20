@@ -44,7 +44,8 @@ int org_outbox_hi(const org_ctx *c);
 int org_auto(const org_ctx *c);            // auto = 1: sort the in-box pages every time a character loads
 // The line a typed command prints (the in-depth messages in *report are for the log): "Shared stash has been organized. X items could not be placed and are found on pages Y-Z."
 void org_summary(const org_ctx *c, char *buf, size_t cap);
-void org_summary_ex(const org_ctx *c, int imported, int stayed, char *buf, size_t cap);     // personal page run: imported / stayed counts (-1, -1 = not one)
+void org_summary_ex(const org_ctx *c, int imported, int stayed, char *buf, size_t cap);
+void org_summary_parked(const org_ctx *c, int personal, char *buf, size_t cap);      // a run on the parking page: personal = the items came from the player's personal page     // personal page run: imported / stayed counts (-1, -1 = not one)
 // Page grid: PlugY's big stash is 10x10; otherwise the game's own Inventory.txt ("Big Bank Page 1"). A forced `grid = WxH` in the rules file wins.
 void org_grid(const org_ctx *c, int bigstash, int *gx, int *gy);
 

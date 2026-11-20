@@ -690,7 +690,7 @@ int org_sort(org_ctx *c, const unsigned char *in, size_t n, int scope, int page,
         free(cur); cur = o; curn = on; src = cur; srcn = curn;
         if (mv == 0) break;
     }
-    c->st_out = outsum;
+    c->st_out = outsum; c->st_moved = total;                      // the summary must see what the FIRST pass moved: the last pass always moves nothing and would say "already in place"
     *out = cur; *outn = curn; *moved = total;
     if (report) *report = rep0; else free(rep0);
     return cur != NULL;
@@ -701,6 +701,7 @@ int org_sort(org_ctx *c, const unsigned char *in, size_t n, int scope, int page,
 // imported / stayed (>= 0 for a personal page): "5 sent to the shared stash, 2 stayed on this page"; -1 = not a personal page run.
 void org_summary_ex(const org_ctx *c, int imported, int stayed, char *buf, size_t cap) {
     if (imported < 0 && c->st_scope == ORG_PAGE && c->st_moved == 0 && c->st_unplaced == 0 && c->st_out == 0) { snprintf(buf, cap, "All items are already within allocated page ranges."); return; }       // nothing to do: every item is already in its block
+    if (imported == 0 && stayed > 0 && c->st_unplaced == 0 && c->st_out == 0) { snprintf(buf, cap, "Nothing was sent to the shared stash: %d item%s stayed on this page.", stayed, stayed == 1 ? "" : "s"); return; }     // a personal page whose items all stayed (unidentified items are never moved)
     size_t n = (size_t)snprintf(buf, cap, "Shared stash organized"); int first = 1;
 #define PART(...) do { if (n < cap) n += (size_t)snprintf(buf + n, cap - n, first ? ": " : ", "); if (n < cap) n += (size_t)snprintf(buf + n, cap - n, __VA_ARGS__); first = 0; } while (0)
 #define ITEMS(n) (n), (n) == 1 ? "" : "s"
@@ -712,6 +713,11 @@ void org_summary_ex(const org_ctx *c, int imported, int stayed, char *buf, size_
     if (n < cap) snprintf(buf + n, cap - n, ".");
 }
 void org_summary(const org_ctx *c, char *buf, size_t cap) { org_summary_ex(c, -1, -1, buf, cap); }
+// A personal page is sorted on a parking page of the shared stash. When nothing came of it the shared-page wording ("already within allocated page ranges") would be wrong: the items are still on the personal page.
+void org_summary_parked(const org_ctx *c, int personal, char *buf, size_t cap) {
+    if (personal && c->st_moved == 0 && c->st_unplaced == 0 && c->st_out == 0) { snprintf(buf, cap, "Nothing was sent to the shared stash: your items stayed on this page."); return; }
+    org_summary_ex(c, -1, -1, buf, cap);
+}
 
 // For tests: how many extended items have a property list that ends exactly where their record ends (a bad one means the parser misread something).
 int org_selfcheck(org_ctx *c, const unsigned char *in, size_t n, int *total, int *bad) {
