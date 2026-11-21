@@ -38,7 +38,7 @@ static int side_collect(const lv_mem_t *m, uint32_t spec, uint32_t py, uint32_t 
             lv_u *it = &s->u[s->nu++]; it->unit = u; it->id = m->rd(u + LV_U_ID); it->page = (int)i + 1; it->col = (int)m->rd(path + LV_PATH_X); it->row = (int)m->rd(path + LV_PATH_Y); p->count++;
             if (want_records) {
                 unsigned char buf[0x1000]; int len = m->save_item(u, buf, sizeof buf);
-                if (len < 16 || len > (int)sizeof buf || buf[0] != 'J' || buf[1] != 'M') { snprintf(err, ecap, "an item on page %u cannot be saved to bytes", i + 1); return 0; }
+                if (len < 14 || len > (int)sizeof buf || buf[0] != 'J' || buf[1] != 'M') { snprintf(err, ecap, "an item on page %u cannot be saved to bytes", i + 1); return 0; }
                 it->rec = (unsigned char *)malloc((size_t)len); memcpy(it->rec, buf, (size_t)len); it->len = (size_t)len; }
             u = m->rd(idata + LV_ID_NEXT);
         }
@@ -58,7 +58,7 @@ static int side_collect(const lv_mem_t *m, uint32_t spec, uint32_t py, uint32_t 
             if (!idata || !m->ok(idata, 0x70) || !path || !m->ok(path, 0x20)) { snprintf(err, ecap, "an item on the personal page has no data"); return 0; }
             lv_u *it = &s->pu[s->npu++]; it->unit = u; it->id = m->rd(u + LV_U_ID); it->page = 0; it->col = (int)m->rd(path + LV_PATH_X); it->row = (int)m->rd(path + LV_PATH_Y);
             if (want_records) { unsigned char buf[0x1000]; int len = m->save_item(u, buf, sizeof buf);
-                if (len < 16 || len > (int)sizeof buf || buf[0] != 'J' || buf[1] != 'M') { snprintf(err, ecap, "an item on the personal page cannot be saved to bytes"); return 0; }
+                if (len < 14 || len > (int)sizeof buf || buf[0] != 'J' || buf[1] != 'M') { snprintf(err, ecap, "an item on the personal page cannot be saved to bytes"); return 0; }
                 it->rec = (unsigned char *)malloc((size_t)len); memcpy(it->rec, buf, (size_t)len); it->len = (size_t)len; }
             u = m->rd(idata + LV_ID_NEXT);
         }
