@@ -65,7 +65,7 @@ Progress is tracked in a ``quartermaster_grail.txt``  which you can delete to re
 Using the spawner requires a config setting turned on:
 
 - ``.spawn <ITEMTYPE>`` - create any item on the fly
-- ``.spawn <ITEMTYPE> [uni|set|rare|magic|nmag]`` - create a unique item made from that item code (random if several share it; run again for another)
+- ``.spawn <ITEMTYPE> [uni|set|rare|magic|nmag]`` - create a unique item made from that item coded
 
 Here is a full example:
 
@@ -73,7 +73,7 @@ Here is a full example:
 
 Use in game dictionary:
 
-- ``.lookup <NAME>`` (also ``.search``) - find the item code of any item by name
+- ``.lookup <NAME>`` - find the item code of any item by name
 
 ## Install
 
