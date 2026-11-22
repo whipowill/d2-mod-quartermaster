@@ -6,9 +6,9 @@ A mod for Diablo II that adds a chat command storage system. The idea is to inte
 
 ## Screenshots
 
-| | | |
-|---|---|---|
-| ![Screenshot 1](https://i.imgur.com/LRWxG6b.jpeg) | ![Screenshot 2](https://i.imgur.com/aN7546o.jpeg) | ![Screenshot 3](https://i.imgur.com/PZBgH2u.jpeg) |
+| | |
+|---|---|
+| ![Screenshot 1](https://i.imgur.com/LRWxG6b.jpeg) | ![Screenshot 3](https://i.imgur.com/PZBgH2u.jpeg) |
 
 ## Features
 
@@ -54,7 +54,7 @@ Pressing the ``Delete`` key will perform the same action as the ``.organize`` co
 ### Holy Grail
 
 - ``.grail`` - shows your Holy Grail progress as a percentage
-- ``.grail unique`` / ``.grail set`` - progress for just uniques or just set items
+- ``.grail [unique|set]`` - progress for just uniques or just set items
 - ``.grail scan`` - imports finds from your saved characters and PlugY stashes
 - ``.grail missing [unique|set]`` - lists items you haven't found yet
 
@@ -65,9 +65,15 @@ Progress is tracked in a ``quartermaster_grail.txt``  which you can delete to re
 Using the spawner requires a config setting turned on:
 
 - ``.spawn <ITEMTYPE>`` - create any item on the fly
-- ``.lookup <NAME>`` - find the index ID of a specific item
-- ``.spawn unique <INDEXID>`` - create any unique item on the fly
-- ``.spawn set <INDEXID>`` - create any set item on the fly
+- ``.spawn <ITEMTYPE> [uni|set|rare|magic|nmag]`` - create a unique item made from that item code (random if several share it; run again for another)
+
+Here is a full example:
+
+- ``.spawn uui 2 eth sock 4`` - spawn two base Dusk Shroud armors (eth w/ 4 sockets)
+
+Use in game dictionary:
+
+- ``.lookup <NAME>`` (also ``.search``) - find the item code of any item by name
 
 ## Install
 

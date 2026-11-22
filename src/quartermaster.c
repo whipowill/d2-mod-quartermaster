@@ -26,7 +26,10 @@ static void do_organize(int all);
 static volatile LONG g_org_mode;                            // what the game now running is, as seen by PlugY's stash load: 0 = unknown, 1 = single player, 2 = multiplayer
 static int g_org_enabled = 0, g_org_auto = 0, g_org_autosell = 0, g_sell_vendor = 154;      // [organize] autosell: sell the outbox after every .organize; sell_vendor = the vendor (NPC class id) whose price list a sale uses (154 = Charsi)
 static volatile LONG g_sell_n, g_sell_gold, g_sell_full, g_sell_abort;                                    // totals of the sale in progress (the server thread adds, the game thread reports)              // ini [organize] enabled (master switch) / auto (sort the in-box pages at every character load)
-static int g_cheat_spawn = 0;               // ini [cheats] spawn: .spawn / .spawn unique / .spawn set (default off)
+// Replies that read the same every time have three wordings; one is picked at random (same arguments in each). Error lines, usage lines and data stay fixed.
+static const wchar_t *vpick(const wchar_t *a, const wchar_t *b, const wchar_t *c) { static unsigned s; s = s * 1664525u + 1013904223u + GetTickCount(); const wchar_t *o[3] = {a, b, c}; return o[(s >> 16) % 3]; }
+#define V3(a, b, c) vpick(a, b, c)
+static int g_cheat_spawn = 0;               // ini [cheats] spawn: .spawn CODE [N] [unique|set] (default off)
 static int g_logging = 0;                 // ini [quartermaster] logging: 1 writes quartermaster.log (default off)
 static volatile LONG g_lines;
 #define MAX_LINES 20000
@@ -348,7 +351,56 @@ static DWORD call_spawn(DWORD fn, DWORD code, DWORD unit, DWORD game) {
                      : "ecx", "edx", "memory", "cc");
     return r;
 }
-static void srv_spawn(DWORD game, DWORD player, DWORD code, int count) {
+static int install_create_hook(void);
+static volatile DWORD g_ovr_on, g_ovr_quality, g_ovr_unique1, g_ovr_ilvl;
+// Ethereal and sockets (D2Game 1.13d, found by reading the item generator): the ethereal roller 6fd003b0 forces ethereal when the generation context's flags
+// (ctx+0x44) carry 0x400000 (test at 6fd00426); the socket roller 6fd00490 (low/normal/superior items only) forces sockets when ctx flag 0x800 is set (test at
+// 6fd00552), then picks 1..max sockets at 6fd0057e (div by the base item's maximum). Three small detours, active only while g_ovr_eth / g_ovr_sock are set around our own spawn call.
+static volatile DWORD g_ovr_eth, g_ovr_sock;
+static int install_flag_hooks(void) {
+    static int done;
+    if (done) return done > 0;
+    static const BYTE bA[] = {0xF7, 0x43, 0x44, 0x00, 0x00, 0x40, 0x00}, bB[] = {0x8B, 0x4B, 0x44, 0xF6, 0xC5, 0x08}, bC[] = {0x33, 0xD2, 0xF7, 0xF6, 0x42, 0x52};
+    BYTE *sA = (BYTE *)(g_dg + 0xe0426), *sB = (BYTE *)(g_dg + 0xe0552), *sC = (BYTE *)(g_dg + 0xe057e);
+    if (!readable(sA, 7) || !readable(sB, 6) || !readable(sC, 6) || memcmp(sA, bA, 7) || memcmp(sB, bB, 6) || memcmp(sC, bC, 6)) {
+        logf_("flag hooks: unexpected bytes at D2Game +0xe0426 / +0xe0552 / +0xe057e - refusing"); done = -1; return 0;
+    }
+    BYTE *st = VirtualAlloc(NULL, 256, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!st) { done = -1; return 0; }
+    BYTE *p = st, *a = st, *b, *c;
+#define E(x) (*p++ = (BYTE)(x))
+#define D32(x) (*(DWORD *)p = (DWORD)(x), p += 4)
+#define JMPTO(t) (E(0xE9), D32((DWORD)(t) - (DWORD)(p + 4)))
+    // A: ethereal
+    E(0x83); E(0x3D); D32(&g_ovr_eth); E(0x00); E(0x75); E(12);                              // cmp [eth],0 ; jne force
+    E(0xF7); E(0x43); E(0x44); D32(0x400000); JMPTO(sA + 7);                                   // test [ebx+44h],400000h ; jmp 6fd0042d   (7 + 5 = 12 bytes: the jne skips them)
+    E(0x81); E(0x4B); E(0x44); D32(0x400000); JMPTO(sA + 7);                                   // force: or [ebx+44h],400000h (non-zero: ZF clear)
+    // B: the socket gate
+    b = p;
+    E(0x8B); E(0x4B); E(0x44); E(0x83); E(0x3D); D32(&g_ovr_sock); E(0x00); E(0x74); E(3); E(0x80); E(0xCD); E(0x08); E(0xF6); E(0xC5); E(0x08); JMPTO(sB + 6);
+    // C: the socket count
+    c = p;
+    E(0x83); E(0x3D); D32(&g_ovr_sock); E(0x00); E(0x74); E(0x12);                           // cmp [sock],0 ; je orig
+    E(0x8B); E(0x15); D32(&g_ovr_sock); E(0x39); E(0xF2); E(0x7E); E(2); E(0x89); E(0xF2); E(0x52); JMPTO(sC + 6);   // mov edx,[sock] ; cmp edx,esi ; jle ok ; mov edx,esi ; ok: push edx ; jmp
+    E(0x33); E(0xD2); E(0xF7); E(0xF6); E(0x42); E(0x52); JMPTO(sC + 6);                       // orig: xor edx,edx ; div esi ; inc edx ; push edx ; jmp
+#undef E
+#undef D32
+    DWORD old;
+    if (!VirtualProtect(sA, 16, PAGE_EXECUTE_READWRITE, &old)) { done = -1; return 0; }
+    sA[0] = 0xE9; *(DWORD *)(sA + 1) = (DWORD)a - (DWORD)(sA + 5); sA[5] = sA[6] = 0x90;
+    VirtualProtect(sA, 16, old, &old);
+    if (!VirtualProtect(sB, 16, PAGE_EXECUTE_READWRITE, &old)) { done = -1; return 0; }
+    sB[0] = 0xE9; *(DWORD *)(sB + 1) = (DWORD)b - (DWORD)(sB + 5); sB[5] = 0x90;
+    VirtualProtect(sB, 16, old, &old);
+    if (!VirtualProtect(sC, 16, PAGE_EXECUTE_READWRITE, &old)) { done = -1; return 0; }
+    sC[0] = 0xE9; *(DWORD *)(sC + 1) = (DWORD)c - (DWORD)(sC + 5); sC[5] = 0x90;
+    VirtualProtect(sC, 16, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), NULL, 0);
+    logf_("flag hooks installed (ethereal, sockets)");
+    done = 1; return 1;
+}
+static void srv_spawn(DWORD game, DWORD player, DWORD code, int count, int cw) {   // cw: bits 0-3 quality (4 = magic), bit 4 ethereal, bits 8-11 sockets
+    int quality = cw & 15, eth = (cw >> 4) & 1, sock = (cw >> 8) & 15;   // quality 4 = magic, 6 = rare (forced through the creator hook), anything else as the game makes it
     static const BYTE head[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};
     BYTE *fn = (BYTE *)(g_dg + 0xeb050);
     if (!thunk_ok(0xa508) || !readable(fn, sizeof head) || memcmp(fn, head, sizeof head)) { say(L"[Quartermaster] Spawn failed: unexpected game version."); return; }
@@ -356,9 +408,12 @@ static void srv_spawn(DWORD game, DWORD player, DWORD code, int count) {
     if (((dg_fn1)(g_dg + 0xa508))(code) == 0xFFFFFFFFu) { logf_("spawn: unknown item code '%s'", c); say(L"[Quartermaster] I don't know the item code '%hs'.", c); return; }
     if (!readable((void *)player, 0x70) || *(DWORD *)player != 0) return;
     int made = 0;
+    if (eth || sock) { if (!install_flag_hooks()) { say(L"[Quartermaster] I can't do that on this game version."); return; } g_ovr_eth = (DWORD)eth; g_ovr_sock = (DWORD)sock; }
+    if (quality == 4 || quality == 6) { if (!install_create_hook()) { say(L"[Quartermaster] I can't do that on this game version."); return; } g_ovr_quality = (DWORD)quality; g_ovr_unique1 = 0; g_ovr_ilvl = 99; g_ovr_on = 1; }
     for (int i = 0; i < count; i++) { DWORD it = call_spawn((DWORD)fn, code, player, game); if (it) made++; else break; }
+    g_ovr_on = 0; g_ovr_eth = 0; g_ovr_sock = 0;
     logf_("spawn: '%s' x%d -> %d created", c, count, made);
-    say(L"[Quartermaster] Spawned %d x '%hs'.", made, c);
+    say(V3(L"[Quartermaster] Spawned %d x '%hs'.", L"[Quartermaster] Conjured %d x '%hs'.", L"[Quartermaster] As you wish: %d x '%hs'."), made, c);
 }
 
 // ---- forcing a specific unique -------------------------------------------------------------------------------
@@ -367,7 +422,6 @@ static void srv_spawn(DWORD game, DWORD player, DWORD code, int count) {
 // when its base item and level fit; 0 = random). We cannot call the creator ourselves (the spawn routine builds the record: owner, game, free
 // spot), so we put a tiny hook at the creator's entry that overwrites those three fields, but ONLY while g_ovr_on is set around our own
 // spawn call. The hook is installed from the server thread on first use, so nothing can be executing inside the creator at that moment.
-static volatile DWORD g_ovr_on, g_ovr_quality, g_ovr_unique1, g_ovr_ilvl;
 static int install_create_hook(void) {
     static int done;                                                      // 1 installed, -1 refused
     if (done) return done > 0;
@@ -406,7 +460,7 @@ static int install_create_hook(void) {
     return 1;
 }
 
-static void srv_spawn_special(DWORD game, DWORD player, DWORD code, int uidx, int set) {      // set: quality 5 + SetItems row, else quality 7 + UniqueItems row
+static void srv_spawn_special(DWORD game, DWORD player, DWORD code, int uidx, int set, int eth) {      // set: quality 5 + SetItems row, else quality 7 + UniqueItems row
     static const BYTE head[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF8, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00};
     BYTE *fn = (BYTE *)(g_dg + 0xeb050);
     if (!thunk_ok(0xa508) || !readable(fn, sizeof head) || memcmp(fn, head, sizeof head)) { say(L"[Quartermaster] Spawn failed: unexpected game version."); return; }
@@ -420,20 +474,21 @@ static void srv_spawn_special(DWORD game, DWORD player, DWORD code, int uidx, in
     size_t stride = set ? 0x1b8 : 0x14c;                                  // SetItems rows 0x1b8 bytes at root+0xc18 (count +0xc1c); UniqueItems rows 0x14c at root+0xc24 (count +0xc28)
     int count = *(int *)(root + (set ? 0xc1c : 0xc28));
     BYTE *tab = (BYTE *)*(DWORD *)(root + (set ? 0xc18 : 0xc24));
-    if (uidx < 0 || uidx >= count || !readable(tab + (size_t)uidx * stride, stride)) { logf_("spawn %s: index %d outside the game's table (%d rows)", kind, uidx, count); say(L"[Quartermaster] The %hs #%d is not in the game's table.", kind, uidx, count); return; }
+    if (uidx < 0 || uidx >= count || !readable(tab + (size_t)uidx * stride, stride)) { logf_("spawn %s: index %d outside the game's table (%d rows)", kind, uidx, count); say(L"[Quartermaster] That %hs item is not in the game's table.", kind); return; }
     logf_("spawn %s: index %d base '%s' (table row dwords: %lx %lx %lx %lx %lx %lx)", kind, uidx, c,
           (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[0], (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[1], (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[2],
           (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[3], (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[4], (unsigned long)((DWORD *)(tab + (size_t)uidx * stride))[5]);
     if (!readable((void *)player, 0x70) || *(DWORD *)player != 0) return;
     if (!install_create_hook()) { say(L"[Quartermaster] I can't do that on this game version."); return; }
     g_ovr_quality = set ? 5 : 7; g_ovr_unique1 = (DWORD)uidx + 1; g_ovr_ilvl = 99;
+    if (eth) { if (!install_flag_hooks()) { say(L"[Quartermaster] I can't do that on this game version."); return; } g_ovr_eth = 1; }
     g_ovr_on = 1;
     DWORD it = call_spawn((DWORD)fn, code, player, game);
-    g_ovr_on = 0;
+    g_ovr_on = 0; g_ovr_eth = 0;
     DWORD q = 0;
     if (it && readable((void *)it, 0x20)) { DWORD d = *(DWORD *)(it + 0x14); if (readable((void *)d, 4)) q = *(DWORD *)d; }        // item data +0: quality (thunk 0xa5e6 is the item-text lookup, not quality)
     logf_("spawn %s: item=%lx quality=%lu", kind, (unsigned long)it, (unsigned long)q);
-    say(it ? L"[Quartermaster] spawned %hs #%d (quality %lu)" : L"[Quartermaster] %hs #%d: nothing created", kind, uidx, (unsigned long)q);
+    say(it ? L"[Quartermaster] spawned a %hs item (quality %lu)" : L"[Quartermaster] %hs item: nothing created", kind, (unsigned long)q);
 }
 
 // ---- deposit / take (server thread) ---------------------------------------------------------------------------
@@ -478,7 +533,7 @@ static int town_ok(DWORD player) {                                              
     int town = lvl == 1 || lvl == 40 || lvl == 75 || lvl == 103 || lvl == 109;
     logf_("town check: level %d -> %s", lvl, lvl <= 0 ? "unknown (refused)" : town ? "town" : "not town (refused)");
     if (lvl <= 0) { say(L"[Quartermaster] I can't tell where you are, so I'm closed."); return 0; }
-    if (!town) { say(L"[Quartermaster] I only work in town."); return 0; }
+    if (!town) { say(V3(L"[Quartermaster] I only work in town.", L"[Quartermaster] Find me in town.", L"[Quartermaster] Not out here. Come to town.")); return 0; }
     return 1;
 }
 
@@ -555,7 +610,7 @@ static void srv_deposit(DWORD game, DWORD player, int mask, int stash_open) {
     }
     if (!n) {
         if (skipped && g_st_stash) say(L"[Quartermaster] Nothing to deposit. I left %d item(s) in the stash alone%ls.", skipped, g_st_stash && !stash_open ? L" (open your stash to include them)" : L"");
-        else say(L"[Quartermaster] Nothing to deposit.");
+        else say(V3(L"[Quartermaster] Nothing to deposit.", L"[Quartermaster] You have nothing for me to store.", L"[Quartermaster] Your pack holds nothing I keep."));
         return;
     }
     static store_t before, after;                                                                 // large; the server thread is single
@@ -604,7 +659,7 @@ static void srv_take(DWORD game, DWORD player, DWORD code, int want) {
     if (!rejuv && kd == KIND_KEY) { char ks[24]; key_short(mi, ks, sizeof ks); snprintf(nmbuf, sizeof nmbuf, "Key of %s", ks); }
     if (!rejuv && kd == KIND_ORGAN) snprintf(nmbuf, sizeof nmbuf, "%s", mi->name);
     const char *nm = rejuv ? "Full Rejuvenation Potion" : (kd == KIND_ESS || kd == KIND_KEY) ? nmbuf : mi->name;
-    if (have < 1) { say(L"[Quartermaster] I hold no %hs for you.", nm); return; }
+    if (have < 1) { say(V3(L"[Quartermaster] I hold no %hs for you.", L"[Quartermaster] There is no %hs in my keeping.", L"[Quartermaster] I have no %hs to give you."), nm); return; }
     int n = want < 1 ? 1 : want;
     if (n > have) n = have;
     if (n > 40) n = 40;                                                                          // one batch; run the command again for more
@@ -617,8 +672,8 @@ static void srv_take(DWORD game, DWORD player, DWORD code, int want) {
     }
     if (made) { if (rejuv) st.halves -= 2 * made; else store_add(&st, code, -made); if (!store_save(&st)) logf_("take: could not write %s", STORE_FILE); }
     logf_("take: '%s' wanted %d, created %d, left %d", cc, want, made, rejuv ? st.halves : store_get(&st, code));
-    if (made < want && made == n && n < want) say(L"[Quartermaster] Took %d %hs(s). That is all I could give.", made, nm);
-    else say(L"[Quartermaster] Took %d %hs(s).", made, nm);
+    if (made < want && made == n && n < want) say(V3(L"[Quartermaster] Took %d %hs(s). That is all I could give.", L"[Quartermaster] %d %hs(s). That is all I had.", L"[Quartermaster] Here: %d %hs(s), and no more."), made, nm);
+    else say(V3(L"[Quartermaster] Took %d %hs(s).", L"[Quartermaster] Here you are: %d %hs(s).", L"[Quartermaster] %d %hs(s), as asked."), made, nm);
 }
 
 // ---- Holy Grail, server side -------------------------------------------------------------------------------
@@ -731,14 +786,14 @@ static int __attribute__((fastcall)) qm_srv(DWORD game, DWORD player, const BYTE
     g_srv_tid = GetCurrentThreadId(); g_reply_player = player;                // say() now answers the player who sent this
     switch (buf[1]) {
         case QM_CMD_SCAN: srv_scan(player); break;
-        case QM_CMD_SPAWN: if (g_cheat_spawn) srv_spawn(game, player, a, buf[6]); break;
-        case QM_CMD_SPAWN_UNIQUE: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 0); break;
+        case QM_CMD_SPAWN: if (g_cheat_spawn) srv_spawn(game, player, a, buf[6], buf[7] | buf[8] << 8); break;
+        case QM_CMD_SPAWN_UNIQUE: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 0, buf[6] >> 7); break;
         case QM_CMD_DEPOSIT: srv_deposit(game, player, buf[6], buf[7] & 1); break;      // buf[7] bit 0 = the client had the stash window open
         case QM_CMD_TAKE: srv_take(game, player, a, buf[6]); break;
         case QM_CMD_GRAIL: if (g_grail) srv_grail(player, buf[6]); break;
         case QM_CMD_DUMP: stash_dump("server", player); break;
         case QM_CMD_LIVE: srv_live(game, player, buf[6], buf[7] | buf[8] << 8); break;           // .organize: the sort runs here, on the server thread
-        case QM_CMD_SPAWN_SET: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 1); break;
+        case QM_CMD_SPAWN_SET: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 1, buf[6] >> 7); break;
     }
     g_reply_player = 0;
     return 0;
@@ -946,6 +1001,21 @@ static int list_load(const char *file, const char *namecol, const char *codecol,
 }
 static int uniq_load(void) { return list_load("Data\\global\\excel\\UniqueItems.txt", "index", "code", "enabled", g_uniq, (int)(sizeof g_uniq / sizeof *g_uniq), &g_uniq_n); }
 static int set_load(void) { return list_load("Data\\global\\excel\\SetItems.txt", "index", "item", NULL, g_set, (int)(sizeof g_set / sizeof *g_set), &g_set_n); }
+// Every base item (Weapons.txt, Armor.txt, Misc.txt): the name the game shows (`namestr` through the .tbl files) and the code. Used by .lookup.
+static uniq_t g_base[1600]; static int g_base_n = -9;
+static int base_load(void) {
+    if (g_base_n == -9) {
+        static const char *const files[] = {"Data\\global\\excel\\Weapons.txt", "Data\\global\\excel\\Armor.txt", "Data\\global\\excel\\Misc.txt"};
+        int total = 0;
+        for (int f = 0; f < 3; f++) {
+            int cnt = -9;
+            if (list_load(files[f], "namestr", "code", NULL, g_base + total, (int)(sizeof g_base / sizeof *g_base) - total, &cnt)) total += cnt;
+        }
+        g_base_n = total > 0 ? total : -1;
+        logf_("base items: %d rows", g_base_n);
+    }
+    return g_base_n > 0;
+}
 static int contains_ci(const char *hay, const char *needle) {
     size_t nl = strlen(needle);
     for (; *hay; hay++) if (!_strnicmp(hay, needle, nl)) return 1;
@@ -1000,19 +1070,19 @@ static void cmd_storage(const char *what) {
         if (g_st_organs) add_part_nf(line, sizeof line, organs, "Organs");
         if (g_st_shards) add_part_nf(line, sizeof line, shards, "Shards");
         if (line[0]) { say(L"[Quartermaster] You have the following items:"); say(L"[Quartermaster] %hs", line); }
-        else if (cat_mask_enabled()) say(L"[Quartermaster] I am holding nothing for you.");
+        else if (cat_mask_enabled()) say(V3(L"[Quartermaster] I am holding nothing for you.", L"[Quartermaster] Your store is empty.", L"[Quartermaster] Nothing of yours is in my keeping."));
         else say(L"[Quartermaster] I am not storing anything.");
         return;
     }
     if (want == CAT_REJUV) {
-        if (!potions && !small) { say(L"[Quartermaster] I have no potions for you."); return; }
+        if (!potions && !small) { say(V3(L"[Quartermaster] I have no potions for you.", L"[Quartermaster] Your potions store is empty.", L"[Quartermaster] Not one of your potions is in my keeping.")); return; }
         say(L"[Quartermaster] You have the following potions:");
         if (potions) say(L"[Quartermaster] Full Rejuvenation %d", potions);
         if (small) say(L"[Quartermaster] Small Rejuvenation 1");
         return;
     }
     if (want == CAT_ESS) {
-        if (!ess) { say(L"[Quartermaster] I have no essences for you."); return; }
+        if (!ess) { say(V3(L"[Quartermaster] I have no essences for you.", L"[Quartermaster] Your essences store is empty.", L"[Quartermaster] Not one of your essences is in my keeping.")); return; }
         char head[] = "", line[128] = "";
         say(L"[Quartermaster] You have the following essences:");
         for (int i = 0; i < g_ness; i++) {
@@ -1025,7 +1095,7 @@ static void cmd_storage(const char *what) {
         return;
     }
     if (want == CAT_KEYS) {
-        if (!keys) { say(L"[Quartermaster] I have no keys for you."); return; }
+        if (!keys) { say(V3(L"[Quartermaster] I have no keys for you.", L"[Quartermaster] Your keys store is empty.", L"[Quartermaster] Not one of your keys is in my keeping.")); return; }
         char head[] = "", line[128] = "";
         say(L"[Quartermaster] You have the following keys:");
         for (int i = 0; i < g_nkeys; i++) {
@@ -1038,7 +1108,7 @@ static void cmd_storage(const char *what) {
         return;
     }
     if (want == CAT_ORGANS) {
-        if (!organs) { say(L"[Quartermaster] I have no organs for you."); return; }
+        if (!organs) { say(V3(L"[Quartermaster] I have no organs for you.", L"[Quartermaster] Your organs store is empty.", L"[Quartermaster] Not one of your organs is in my keeping.")); return; }
         char head[] = "", line[128] = "";
         say(L"[Quartermaster] You have the following organs:");
         for (int i = 0; i < g_norgans; i++) {
@@ -1051,13 +1121,13 @@ static void cmd_storage(const char *what) {
         return;
     }
     if (want == CAT_SHARDS) {
-        if (!shards) { say(L"[Quartermaster] I have no shards for you."); return; }
+        if (!shards) { say(V3(L"[Quartermaster] I have no shards for you.", L"[Quartermaster] Your shards store is empty.", L"[Quartermaster] Not one of your shards is in my keeping.")); return; }
         say(L"[Quartermaster] You have the following shards:");
         say(L"[Quartermaster] Worldstone Shard %d", shards);
         return;
     }
     if (want == CAT_GEMS) {                                                         // one line per gem family, best grade first
-        if (!gems) { say(L"[Quartermaster] I have no gems for you."); return; }
+        if (!gems) { say(V3(L"[Quartermaster] I have no gems for you.", L"[Quartermaster] Your gems store is empty.", L"[Quartermaster] Not one of your gems is in my keeping.")); return; }
         char done[16][5]; int ndone = 0;
         say(L"[Quartermaster] You have the following gems:");
         for (int f = 0; f < g_ngems; f++) {
@@ -1095,7 +1165,7 @@ static void cmd_storage(const char *what) {
         }
         return;
     }
-    if (!runes) { say(L"[Quartermaster] I have no runes for you."); return; }                // runes: highest first, packed into lines
+    if (!runes) { say(V3(L"[Quartermaster] I have no runes for you.", L"[Quartermaster] Your runes store is empty.", L"[Quartermaster] Not one of your runes is in my keeping.")); return; }                // runes: highest first, packed into lines
     char line[128] = ""; int nrow = 0;
     say(L"[Quartermaster] You have the following runes:");
     for (int i = 0; i < g_nrunes; i++) {
@@ -1117,6 +1187,9 @@ static void cmd_storage(const char *what) {
 typedef struct { char when[20]; char who[16]; } gstat_t;
 static gstat_t g_gs[2][800]; static int g_gr_state;                           // 0 not loaded, 1 ready, -1 failed
 static const char *const g_gr_kind[3] = {"unique", "set"};
+static int word_is(const char *w, const char *full) { size_t n = strlen(w); return n >= 1 && n <= strlen(full) && !_strnicmp(w, full, n); }   // w is the start of full: "uni" is "uniques"
+static int is_uniq_word(const char *w) { return word_is(w, "uniques"); }
+static int is_set_word(const char *w) { return word_is(w, "sets"); }
 static uniq_t *gr_arr(int k) { return k == 0 ? g_uniq : g_set; }
 static int gr_n(int k) {
     int n = k == 0 ? g_uniq_n : g_set_n;
@@ -1263,8 +1336,8 @@ static void grail_missing(const char *a) {
     while (*a) {
         const char *e = a; while (*e && *e != ' ') e++;
         char w[16]; snprintf(w, sizeof w, "%.*s", (int)(e - a) < 15 ? (int)(e - a) : 15, a);
-        if (!_stricmp(w, "unique") || !_stricmp(w, "uniques") || !_stricmp(w, "u")) kmin = kmax = 0;
-        else if (!_stricmp(w, "set") || !_stricmp(w, "sets") || !_stricmp(w, "s")) kmin = kmax = 1;
+        if (is_uniq_word(w)) kmin = kmax = 0;
+        else if (is_set_word(w)) kmin = kmax = 1;
         else if (w[0] >= '0' && w[0] <= '9') lim = atoi(w);
         else { say(L"[Quartermaster] Usage: .grail missing [unique|set] [COUNT]"); return; }
         a = e; while (*a == ' ') a++;
@@ -1280,13 +1353,13 @@ static void grail_missing(const char *a) {
             else more++;
         }
     }
-    if (!shown) say(L"[Quartermaster] Nothing missing here. Well done!");
+    if (!shown) say(V3(L"[Quartermaster] Nothing missing here. Well done!", L"[Quartermaster] Not a single one missing. Well done!", L"[Quartermaster] Nothing left to find. Well done!"));
     else if (more) say(L"[Quartermaster] ...and %d more missing.", more);
 }
 static void cmd_grail(const char *args) {
     if (!g_grail) { say(L"[Quartermaster] Holy Grail tracking is switched off."); return; }
     int scan = !_stricmp(args, "scan"), miss = !_strnicmp(args, "missing", 7) && (!args[7] || args[7] == ' ');
-    int kind = !_stricmp(args, "unique") || !_stricmp(args, "uniques") || !_stricmp(args, "u") ? 0 : !_stricmp(args, "set") || !_stricmp(args, "sets") || !_stricmp(args, "s") ? 1 : -1;
+    int kind = is_uniq_word(args) ? 0 : is_set_word(args) ? 1 : -1;
     if (*args && !scan && !miss && kind < 0) { say(L"[Quartermaster] Usage: .grail [unique|set|scan|missing]"); return; }
     if (!gr_init()) { say(L"[Quartermaster] I could not read the unique and set lists."); return; }
     if (miss) { const char *r = args + 7; while (*r == ' ') r++; grail_missing(r); return; }
@@ -1331,7 +1404,7 @@ static void gr_pump(void) {                                                   //
     if (g_scan_pending && (int)(now - g_scan_until) >= 0) {                  // end of .grail scan: one summary
         g_scan_pending = 0;
         if (g_scan_added) { say(L"[Quartermaster] Added %d new item(s) to your Holy Grail.", g_scan_added); gr_save(); }
-        else say(L"[Quartermaster] No new items to add to your Holy Grail.");
+        else say(V3(L"[Quartermaster] No new items to add to your Holy Grail.", L"[Quartermaster] Nothing new for your Holy Grail.", L"[Quartermaster] I found nothing new for your Holy Grail."));
         gr_progress(0);
     }
     if (!g_gr_req || now - last < 1000) return;                               // only after an item moved (see h_recv), at most once a second
@@ -1394,61 +1467,76 @@ static int qm_command(const char *text) {
     if (text[i] && text[i] != ' ') return 0;                              // ".depositx" is not ours
     while (text[i] == ' ') i++;
     const char *args = text + i;
-    if (!strcmp(word, "find")) strcpy(word, "lookup");                   // aliases: .find = .lookup, .withdraw = .take
+    if (!strcmp(word, "find") || !strcmp(word, "search")) strcpy(word, "lookup");   // aliases: .find / .search = .lookup, .withdraw = .take
     else if (!strcmp(word, "take")) strcpy(word, "withdraw");   // internal name stays "withdraw"
     if (strcmp(word, "deposit") && strcmp(word, "withdraw") && strcmp(word, "storage") && strcmp(word, "spawn") && strcmp(word, "lookup") && strcmp(word, "scan") && strcmp(word, "grail") && strcmp(word, "organize") && strcmp(word, "stashdump")) return 0;
     logf_("command: .%s %s", word, args);
     if (!strcmp(word, "spawn") && !g_cheat_spawn) {                       // cheat, off unless the ini says otherwise
-        say(L"[Quartermaster] Spawn is not allowed.");
+        say(V3(L"[Quartermaster] Spawn is not allowed.", L"[Quartermaster] That is not something I do.", L"[Quartermaster] I conjure nothing; the cheat is off."));
         return 1;
     }
-    if (!strcmp(word, "lookup")) {                                        // .lookup WORDS : list unique and set items whose name contains the words
-        if (!*args) say(L"[Quartermaster] Usage: .lookup WORDS   e.g. .lookup jordan");
+    if (!strcmp(word, "lookup")) {                                        // .lookup WORDS : list every item (base, unique, set) whose name contains the words, or whose code is the words
+        if (!*args) say(L"[Quartermaster] Usage: .lookup WORDS   e.g. .lookup jordan   or   .lookup war pike");
         else {
-            int ul = uniq_load(), sl = set_load(), hits = 0;
-            if (!ul && !sl) say(L"[Quartermaster] I could not read the unique and set lists.");
-            for (int k = 0; k < 2; k++) {
-                const uniq_t *arr = k ? g_set : g_uniq; int cnt = k ? (sl ? g_set_n : 0) : (ul ? g_uniq_n : 0);
+            int bl = base_load(), ul = uniq_load(), sl = set_load(), hits = 0;
+            if (!bl && !ul && !sl) say(L"[Quartermaster] I could not read the item lists.");
+            for (int k = 0; k < 3; k++) {                                 // 0 base items, 1 unique, 2 set
+                const uniq_t *arr = k == 0 ? g_base : k == 1 ? g_uniq : g_set;
+                int cnt = k == 0 ? (bl ? g_base_n : 0) : k == 1 ? (ul ? g_uniq_n : 0) : (sl ? g_set_n : 0);
                 for (int u = 0; u < cnt; u++) {
-                    if (!contains_ci(arr[u].name, args)) continue;
-                    if (hits < 5) { int cl = 4; while (cl > 0 && arr[u].code[cl - 1] == ' ') cl--; say(L"[Quartermaster] %hs  (%.*hs)  %hs #%d", arr[u].name, cl, arr[u].code, k ? "set" : "unique", u); }
+                    int cl = 4; while (cl > 0 && arr[u].code[cl - 1] == ' ') cl--;
+                    if (!*arr[u].name || !cl) continue;
+                    if (!contains_ci(arr[u].name, args) && !(cl == (int)strlen(args) && !_strnicmp(arr[u].code, args, (size_t)cl))) continue;
+                    if (hits < 5) say(L"[Quartermaster] %hs  (%.*hs)%hs", arr[u].name, cl, arr[u].code, k == 1 ? "  unique" : k == 2 ? "  set" : "");
                     hits++;
                 }
             }
-            if (!hits && (ul || sl)) say(L"[Quartermaster] I know no unique or set item like '%.40hs'.", args);
+            if (!hits && (bl || ul || sl)) say(V3(L"[Quartermaster] I know no item like '%.40hs'.", L"[Quartermaster] No item here matches '%.40hs'.", L"[Quartermaster] '%.40hs' means nothing to me."), args);
             else if (hits > 5) say(L"[Quartermaster] ...and %d more. Narrow the search.", hits - 5);
         }
-    } else if (!strcmp(word, "spawn") && (!_strnicmp(args, "unique ", 7) || !_strnicmp(args, "u ", 2) || !_strnicmp(args, "set ", 4) || !_strnicmp(args, "s ", 2))) {
-        int set = (args[0] == 's' || args[0] == 'S');                      // .spawn unique|u NAME | #INDEX   and   .spawn set|s NAME | #INDEX
-        const char *name = args + (!_strnicmp(args, "unique ", 7) ? 7 : !_strnicmp(args, "set ", 4) ? 4 : 2);
-        while (*name == ' ') name++;
-        const uniq_t *arr = set ? g_set : g_uniq; int *cnt = set ? &g_set_n : &g_uniq_n;
-        int found = -1, hits = 0, ok = set ? set_load() : uniq_load();
-        if (!ok) say(L"[Quartermaster] I could not read the %hs list.", set ? "set" : "unique");
-        else if (*name == '#' || (*name >= '0' && *name <= '9')) { int u = atoi(name + (*name == '#')); if (u >= 0 && u < *cnt) found = u, hits = 1; }     // by index: #285 or 285
-        else if (*name) {
-            for (int u = 0; u < *cnt; u++) if (contains_ci(arr[u].name, name)) {
-                if (!_stricmp(arr[u].name, name)) { found = u; hits = 1; break; }          // exact name wins
-                if (hits++ == 0) found = u;
-            }
-        }
-        if (ok && found < 0) say(L"[Quartermaster] I know no %hs item like '%.40hs'. Try \".lookup\".", set ? "set" : "unique", name);
-        else if (ok && hits > 1) say(L"[Quartermaster] %d items match '%.40hs'. Use \".lookup\" and spawn by #index.", hits, name);
-        else if (ok) {
-            logf_("spawn %s: '%s' code '%.4s' #%d", set ? "set" : "unique", arr[found].name, arr[found].code, found);
-            if (!send_cmd(set ? QM_CMD_SPAWN_SET : QM_CMD_SPAWN_UNIQUE, *(DWORD *)arr[found].code, 1, found)) say(L"[Quartermaster] Not ready. Start or join a game first.");
-        }
-    } else if (!strcmp(word, "spawn")) {                                  // cheat: .spawn CODE [COUNT] drops the item beside you
+    } else if (!strcmp(word, "spawn")) {                                  // cheat: .spawn CODE [COUNT] [unique|set] drops the item beside you
         char code[5] = "    "; int k = 0;
         while (args[k] && args[k] != ' ' && k < 4) { char ch = args[k]; code[k] = (ch >= 'A' && ch <= 'Z') ? (char)(ch + 32) : ch; k++; }
         const char *rest = args + k;
         while (*rest && *rest != ' ') rest++;                             // a code longer than 4 characters is not valid anyway; the server rejects it
-        while (*rest == ' ') rest++;
-        int count = *rest >= '0' && *rest <= '9' ? atoi(rest) : 1;
+        int count = 1, quality = 0, eth = 0, sock = 0;                                       // quality: 0 as the game rolls it (normal), 1 unique, 2 set, 3 magic, 4 rare
+        while (*rest) {                                                   // the remaining words, in any order: a number and/or unique|u|set|s
+            while (*rest == ' ') rest++;
+            if (!*rest) break;
+            char w[16]; snprintf(w, sizeof w, "%.*s", (int)strcspn(rest, " ") < 15 ? (int)strcspn(rest, " ") : 15, rest);    // this word
+            if (*rest >= '0' && *rest <= '9') count = atoi(rest);
+            else if (!_strnicmp(rest, "eth", 3)) eth = 1;                     // eth | ethereal
+            else if (!_strnicmp(rest, "sock", 4)) {                           // sock N | socket N | sockets N : N = 1..6, normal base items only
+                while (*rest && *rest != ' ') rest++;
+                while (*rest == ' ') rest++;
+                sock = atoi(rest); if (sock < 1) sock = 1; if (sock > 6) sock = 6;
+            }
+            else if (word_is(w, "unique")) quality = 1;                      // u | un | uni | uniq | uniqu | unique
+            else if (word_is(w, "rare")) quality = 4;                         // r | ra | rar | rare
+            else if (word_is(w, "magic")) quality = 3;                 // mag | magic
+            else if (!_strnicmp(rest, "nmag", 4) || (w[0] == 'n' && word_is(w, "normal"))) quality = 0;   // nmag | n | no | nor | norm | norma | normal
+            else if (word_is(w, "set")) quality = 2;                          // s | se | set
+            while (*rest && *rest != ' ') rest++;
+        }
         if (count < 1) count = 1;
         if (count > 25) count = 25;
-        if (!k || k > 4) say(L"[Quartermaster] Usage: .spawn CODE [COUNT]   e.g. .spawn rvl 5");
-        else if (!send_cmd(QM_CMD_SPAWN, *(DWORD *)code, count, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
+        if (!k || k > 4) say(L"[Quartermaster] Usage: .spawn CODE [COUNT] [nmag|mag|rare|unique|set] [eth] [sock N]   e.g. .spawn rvl 5   or   .spawn 7wa unique");
+        else if (sock && quality) say(L"[Quartermaster] Sockets can only be asked for on normal items (not mag, unique or set).");
+        else if (quality == 0 || quality == 3 || quality == 4) { if (!send_cmd(QM_CMD_SPAWN, *(DWORD *)code, count, (quality == 3 ? 4 : quality == 4 ? 6 : 0) | eth << 4 | sock << 8)) say(L"[Quartermaster] Not ready. Start or join a game first."); }
+        else {                                                            // by item code: one of the unique/set items made from that base item (picked at random when several share the code)
+            int set = quality == 2, ok = set ? set_load() : uniq_load();
+            const uniq_t *arr = set ? g_set : g_uniq; int cnt = set ? g_set_n : g_uniq_n, match[64], nm = 0;
+            if (!ok) say(L"[Quartermaster] I could not read the %hs list.", set ? "set" : "unique");
+            else {
+                for (int u = 0; u < cnt && nm < 64; u++) if (!arr[u].off && !_strnicmp(arr[u].code, code, 4)) match[nm++] = u;
+                if (!nm) say(L"[Quartermaster] No %hs item uses the code '%.4hs'. Try \".lookup\".", set ? "set" : "unique", code);
+                else for (int i = 0; i < count; i++) {
+                    int pick = match[(int)(GetTickCount() + (unsigned)i * 7919u) % nm];
+                    logf_("spawn %s: '%s' code '%.4s' #%d", set ? "set" : "unique", arr[pick].name, arr[pick].code, pick);
+                    if (!send_cmd(set ? QM_CMD_SPAWN_SET : QM_CMD_SPAWN_UNIQUE, *(DWORD *)arr[pick].code, eth << 7 | 1, pick)) { say(L"[Quartermaster] Not ready. Start or join a game first."); break; }
+                }
+            }
+        }
     } else if (!strcmp(word, "grail")) {                                  // .grail : Holy Grail progress
         cmd_grail(args);
     } else if (!strcmp(word, "storage")) {                                // .storage [rejuv|gems|runes]
@@ -1835,7 +1923,7 @@ static void lv_start_server(void) {
 // server (srv_sell) and the pages are swapped back. An outbox page that is the open page is sold directly.
 static void sell_finish(void) {
     LONG n = g_sell_n, gold = g_sell_gold;
-    if (n == 0 && !g_sell_full) { if (!g_lv.sell_auto && !g_sell_abort) say(L"[Quartermaster] Nothing to sell."); }
+    if (n == 0 && !g_sell_full) { if (!g_lv.sell_auto && !g_sell_abort) say(V3(L"[Quartermaster] Nothing to sell.", L"[Quartermaster] The outbox is empty.", L"[Quartermaster] I have nothing to sell for you.")); }
     else say(L"[Quartermaster] Sold %ld item%ls for %ld gold%ls.", (long)n, n == 1 ? L"" : L"s", (long)gold, g_sell_full ? L". Your gold is full: the rest is still in the outbox" : L"");
     g_lv.state = LV_IDLE;
 }
@@ -1911,7 +1999,7 @@ static void do_organize(int all) {
     if (!GetModuleHandleA("PlugY.dll")) { say(L"[Quartermaster] The stash organizer needs PlugY, which is not installed."); return; }
     if (!g_org_hooked) { say(L"[Quartermaster] The stash organizer is not attached to PlugY (see quartermaster.log)."); return; }
     if (g_org_mode != 1) { say(L"[Quartermaster] The stash organizer is disabled in multiplayer games."); return; }          // only a game whose stash PlugY loaded through its single-player path
-    if (g_lv.state != LV_IDLE) { say(L"[Quartermaster] Still organizing; wait a moment."); return; }
+    if (g_lv.state != LV_IDLE) { say(V3(L"[Quartermaster] Still organizing; wait a moment.", L"[Quartermaster] One moment, I am still sorting.", L"[Quartermaster] Patience; the stash is still being sorted.")); return; }
     int shared = 0, page = plugy_current_page(&shared);
     if (page <= 0) { say(L"[Quartermaster] I cannot tell which stash page you are looking at."); return; }
     if (!all) {
@@ -2050,7 +2138,7 @@ static int load_config(void) {            // returns [quartermaster] enabled
                   "sell_vendor=154\r\n"
                   "\r\n"
                   "[cheats]\r\n"
-                  "; 1 = allow .spawn CODE / .spawn unique NAME / .spawn set NAME (creates items out of nothing), 0 = off\r\n"
+                  "; 1 = allow .spawn CODE [COUNT] [unique|set] (creates items out of nothing), 0 = off\r\n"
                   "spawn=0\r\n", f);
             fclose(f);
         }
