@@ -64,8 +64,8 @@ Progress is tracked in a ``quartermaster_grail.txt``  which you can delete to re
 
 Using the spawner requires a config setting turned on:
 
-- ``.spawn <ITEMTYPE>`` - create any item on the fly
-- ``.spawn <ITEMTYPE> [uni|set|rare|magic|nmag]`` - create a unique item made from that item coded
+- ``.spawn <ITEMCODE>`` - create any item on the fly
+- ``.spawn <ITEMCODE> [uni|set|rare|magic|nmag]`` - create a unique item made from that item coded
 
 Here is a full example:
 
