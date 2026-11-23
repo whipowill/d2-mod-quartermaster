@@ -23,6 +23,7 @@ static int g_grail = 1;                                    // ini [grail] enable
 static int g_key_organize = 0x2E;                            // ini [keys] organize (default Delete, VK_DELETE); 0 = no key
 static volatile LONG g_key_req2;                            // the organize key was pressed (handled on the game thread)
 static void do_organize(int all);
+static DWORD client_player(void);
 static volatile LONG g_org_mode;                            // what the game now running is, as seen by PlugY's stash load: 0 = unknown, 1 = single player, 2 = multiplayer
 static int g_org_enabled = 0, g_org_auto = 0, g_org_autosell = 0, g_sell_vendor = 154;      // [organize] autosell: sell the outbox after every .organize; sell_vendor = the vendor (NPC class id) whose price list a sale uses (154 = Charsi)
 static volatile LONG g_sell_n, g_sell_gold, g_sell_full, g_sell_abort;                                    // totals of the sale in progress (the server thread adds, the game thread reports)              // ini [organize] enabled (master switch) / auto (sort the in-box pages at every character load)
@@ -786,14 +787,14 @@ static int __attribute__((fastcall)) qm_srv(DWORD game, DWORD player, const BYTE
     g_srv_tid = GetCurrentThreadId(); g_reply_player = player;                // say() now answers the player who sent this
     switch (buf[1]) {
         case QM_CMD_SCAN: srv_scan(player); break;
-        case QM_CMD_SPAWN: if (g_cheat_spawn) srv_spawn(game, player, a, buf[6], buf[7] | buf[8] << 8); break;
-        case QM_CMD_SPAWN_UNIQUE: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 0, buf[6] >> 7); break;
+        case QM_CMD_SPAWN: if (g_cheat_spawn && town_ok(player)) srv_spawn(game, player, a, buf[6], buf[7] | buf[8] << 8); break;
+        case QM_CMD_SPAWN_UNIQUE: if (g_cheat_spawn && town_ok(player)) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 0, buf[6] >> 7); break;
         case QM_CMD_DEPOSIT: srv_deposit(game, player, buf[6], buf[7] & 1); break;      // buf[7] bit 0 = the client had the stash window open
         case QM_CMD_TAKE: srv_take(game, player, a, buf[6]); break;
         case QM_CMD_GRAIL: if (g_grail) srv_grail(player, buf[6]); break;
         case QM_CMD_DUMP: stash_dump("server", player); break;
         case QM_CMD_LIVE: srv_live(game, player, buf[6], buf[7] | buf[8] << 8); break;           // .organize: the sort runs here, on the server thread
-        case QM_CMD_SPAWN_SET: if (g_cheat_spawn) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 1, buf[6] >> 7); break;
+        case QM_CMD_SPAWN_SET: if (g_cheat_spawn && town_ok(player)) srv_spawn_special(game, player, a, buf[7] | buf[8] << 8, 1, buf[6] >> 7); break;
     }
     g_reply_player = 0;
     return 0;
@@ -1475,6 +1476,7 @@ static int qm_command(const char *text) {
         say(V3(L"[Quartermaster] Spawn is not allowed.", L"[Quartermaster] That is not something I do.", L"[Quartermaster] I conjure nothing; the cheat is off."));
         return 1;
     }
+    if ((!strcmp(word, "spawn") || !strcmp(word, "withdraw")) && client_player() && !town_ok(client_player())) return 1;   // .spawn and .take: the town refusal comes first, before any usage text
     if (!strcmp(word, "lookup")) {                                        // .lookup WORDS : list every item (base, unique, set) whose name contains the words, or whose code is the words
         if (!*args) { say(L"[Quartermaster] Usage: .lookup WORDS"); say(L"[Quartermaster] WORDS can be a name or an item code."); }
         else {
