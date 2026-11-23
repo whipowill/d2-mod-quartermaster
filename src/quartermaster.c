@@ -772,7 +772,7 @@ static void stash_dump(const char *who, DWORD unit) {
 }
 static int send_cmd(int cmd, DWORD a, int b, int c);
 static void stash_dump_client_and_ask_server(void) {
-    if (!g_logging) { say(L"[Quartermaster] Set logging=1 in quartermaster.ini first; the dump goes to quartermaster.log."); return; }
+    if (!g_logging) { say(L"[Quartermaster] Turn on logging=1 in quartermaster.ini first."); return; }
     HMODULE cl = GetModuleHandleA("D2Client.dll"); DWORD ch = cl ? ((DWORD (__stdcall *)(void))((BYTE *)cl + 0x613C0))() : 0;
     stash_dump("client", ch);
     if (!send_cmd(QM_CMD_DUMP, 0, 0, 0)) say(L"[Quartermaster] Not ready. Start or join a game first.");
@@ -1476,7 +1476,7 @@ static int qm_command(const char *text) {
         return 1;
     }
     if (!strcmp(word, "lookup")) {                                        // .lookup WORDS : list every item (base, unique, set) whose name contains the words, or whose code is the words
-        if (!*args) say(L"[Quartermaster] Usage: .lookup WORDS   e.g. .lookup jordan   or   .lookup war pike");
+        if (!*args) { say(L"[Quartermaster] Usage: .lookup WORDS   e.g. .lookup jordan"); say(L"[Quartermaster] or a code: .lookup uui"); }
         else {
             int bl = base_load(), ul = uniq_load(), sl = set_load(), hits = 0;
             if (!bl && !ul && !sl) say(L"[Quartermaster] I could not read the item lists.");
@@ -1520,8 +1520,8 @@ static int qm_command(const char *text) {
         }
         if (count < 1) count = 1;
         if (count > 25) count = 25;
-        if (!k || k > 4) say(L"[Quartermaster] Usage: .spawn CODE [COUNT] [nmag|mag|rare|unique|set] [eth] [sock N]   e.g. .spawn rvl 5   or   .spawn 7wa unique");
-        else if (sock && quality) say(L"[Quartermaster] Sockets can only be asked for on normal items (not mag, unique or set).");
+        if (!k || k > 4) { say(L"[Quartermaster] Usage: .spawn CODE [COUNT] [QUALITY] [eth] [sock N]"); say(L"[Quartermaster] QUALITY: nmag mag rare unique set  e.g. .spawn 7wa unique"); }
+        else if (sock && quality) say(L"[Quartermaster] Sockets only work on normal items (not mag, unique or set).");
         else if (quality == 0 || quality == 3 || quality == 4) { if (!send_cmd(QM_CMD_SPAWN, *(DWORD *)code, count, (quality == 3 ? 4 : quality == 4 ? 6 : 0) | eth << 4 | sock << 8)) say(L"[Quartermaster] Not ready. Start or join a game first."); }
         else {                                                            // by item code: one of the unique/set items made from that base item (picked at random when several share the code)
             int set = quality == 2, ok = set ? set_load() : uniq_load();
@@ -1563,7 +1563,7 @@ static int qm_command(const char *text) {
     } else if (!strcmp(word, "withdraw")) {                               // .take ITEM [AMOUNT]   (no amount = 1; there is no "all")
         const char *s = args; while (*s == ' ') s++;
         const char *e = args + strlen(args); while (e > s && e[-1] == ' ') e--;
-        if (e == s) { say(L"[Quartermaster] Usage: .take ITEM [AMOUNT]   e.g. .take rejuv 5   or   .take r12"); return 1; }
+        if (e == s) { say(L"[Quartermaster] Usage: .take ITEM [AMOUNT]   e.g. .take rejuv 5"); return 1; }
         const char *q = e; while (q > s && q[-1] != ' ') q--;                                    // the last word
         int count = 1, found = 0; char item[48]; DWORD code = 0;
         if (q > s && *q >= '0' && *q <= '9') {                                                    // "ITEM AMOUNT"
@@ -1932,7 +1932,7 @@ static void sell_start(int automatic) {
     int shared = 0, page = plugy_current_page(&shared);
     if (page <= 0) { if (!automatic) say(L"[Quartermaster] I cannot tell which stash page you are looking at."); return; }
     int lo = 0, hi = 0; EnterCriticalSection(&g_org_cs); if (org_prepare()) { lo = org_outbox_lo(g_org); hi = org_outbox_hi(g_org); } LeaveCriticalSection(&g_org_cs);
-    if (lo <= 0 || hi < lo) { if (!automatic) say(L"[Quartermaster] There is no outbox to sell (outbox is not set in quartermaster_organize.cfg)."); return; }
+    if (lo <= 0 || hi < lo) { if (!automatic) say(L"[Quartermaster] No outbox set to sell (see quartermaster_organize.cfg)."); return; }
     InterlockedExchange(&g_sell_n, 0); InterlockedExchange(&g_sell_gold, 0); InterlockedExchange(&g_sell_full, 0); InterlockedExchange(&g_sell_abort, 0);
     g_lv.scope = 5; g_lv.sell_cur = lo - 1; g_lv.sell_lo = lo; g_lv.sell_hi = hi; g_lv.sell_p = page; g_lv.sell_shared = shared; g_lv.sell_auto = automatic; g_lv.prev_shared = shared; g_lv.prev_page = page;
     logf_("sell: starting (%s), outbox pages %d-%d, you are on %s page %d", automatic ? "autosell" : "command", lo, hi, shared ? "shared" : "personal", page);
@@ -1962,7 +1962,7 @@ static void sell_pump(DWORD now) {
         }
     } else if (g_lv.state == LV_SELL_SWAP2) {
         if (g_lv.ack) g_lv.state = LV_SELL_NEXT;
-        else if (now - g_lv.t0 > 10000) { say(L"[Quartermaster] The stash did not answer while putting pages back; check your stash."); sell_finish(); }
+        else if (now - g_lv.t0 > 10000) { say(L"[Quartermaster] The stash did not answer; check your stash pages."); sell_finish(); }
     }
 }
 static void live_pump(void) {                                                           // game thread, every frame
@@ -1977,11 +1977,11 @@ static void live_pump(void) {                                                   
     } else if (g_lv.state == LV_WAIT_SELF) {
         int sh = 1, pg = plugy_current_page(&sh);
         if (pg > 0 && !sh) lv_start_server();
-        else if (now - g_lv.t0 > 3000) { say(L"[Quartermaster] Could not switch to a personal stash page; nothing was changed."); g_lv.state = LV_IDLE; }
+        else if (now - g_lv.t0 > 3000) { say(L"[Quartermaster] Could not switch to a personal stash page. Nothing changed."); g_lv.state = LV_IDLE; }
     } else if (g_lv.state == LV_WAIT_AWAY) {                                              // a personal source page: its items are in its list once another personal page is open
         int sh = 1, pg = plugy_current_page(&sh);
         if (pg > 0 && !sh && pg != g_lv.page) lv_start_server();
-        else if (now - g_lv.t0 > 3000) { say(L"[Quartermaster] Could not switch to another personal stash page; nothing was changed."); g_lv.state = LV_IDLE; }
+        else if (now - g_lv.t0 > 3000) { say(L"[Quartermaster] Could not switch to another stash page. Nothing changed."); g_lv.state = LV_IDLE; }
     } else if (g_lv.state == LV_WAIT_SERVER) {
         if (g_lv.server_done && g_lv.scope == 4) {                                        // bring back what is left on the parking page
             lv_plan_swap(g_lv.park, !g_lv.prev_shared); g_lv.state = LV_RESTORE; g_lv.next_ms = now + 100; g_lv.chk = 0;
@@ -1995,9 +1995,9 @@ static void live_pump(void) {                                                   
     }
 }
 static void do_organize(int all) {
-    if (!g_org_enabled) { say(L"[Quartermaster] The stash organizer is switched off (enabled=0 in quartermaster.ini)."); return; }
+    if (!g_org_enabled) { say(L"[Quartermaster] The stash organizer is off (enabled=0 in quartermaster.ini)."); return; }
     if (!GetModuleHandleA("PlugY.dll")) { say(L"[Quartermaster] The stash organizer needs PlugY, which is not installed."); return; }
-    if (!g_org_hooked) { say(L"[Quartermaster] The stash organizer is not attached to PlugY (see quartermaster.log)."); return; }
+    if (!g_org_hooked) { say(L"[Quartermaster] The stash organizer is not attached to PlugY (see the log)."); return; }
     if (g_org_mode != 1) { say(L"[Quartermaster] The stash organizer is disabled in multiplayer games."); return; }          // only a game whose stash PlugY loaded through its single-player path
     if (g_lv.state != LV_IDLE) { say(V3(L"[Quartermaster] Still organizing; wait a moment.", L"[Quartermaster] One moment, I am still sorting.", L"[Quartermaster] Patience; the stash is still being sorted.")); return; }
     int shared = 0, page = plugy_current_page(&shared);
@@ -2007,7 +2007,7 @@ static void do_organize(int all) {
     }
     g_lv.scope = all ? 1 : !shared ? 3 : 2; g_lv.page = all ? 0 : page; g_lv.prev_shared = shared; g_lv.prev_page = page; g_lv.server_done = 0;
     if (!all) {                                                                             // the page you are looking at (shared or personal): park its items on a far shared page with PlugY's swap, sort them there, swap back what is left. You never leave the page.
-        if (!client_page_free(PARK_PAGE)) { say(L"[Quartermaster] Page %d of your shared stash is in use; I need it free to organize.", PARK_PAGE); return; }
+        if (!client_page_free(PARK_PAGE)) { say(L"[Quartermaster] Shared stash page %d is in use; I need it free to organize.", PARK_PAGE); return; }
         logf_("organize: %s page %d: parking its items on shared page %d (you stay on this page)", shared ? "shared" : "personal", page, PARK_PAGE);
         g_lv.scope = 4; g_lv.page = PARK_PAGE; g_lv.park = PARK_PAGE; g_lv.open_p = shared ? page : 0; g_lv.ack = 0; lv_plan_swap(PARK_PAGE, !shared);
         for (int i = 0; i < g_lv.nnav; i++) lv_send_plugy(g_lv.nav[i]);
