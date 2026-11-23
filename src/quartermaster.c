@@ -1476,7 +1476,7 @@ static int qm_command(const char *text) {
         say(V3(L"[Quartermaster] Spawn is not allowed.", L"[Quartermaster] That is not something I do.", L"[Quartermaster] I conjure nothing; the cheat is off."));
         return 1;
     }
-    if ((!strcmp(word, "spawn") || !strcmp(word, "withdraw")) && client_player() && !town_ok(client_player())) return 1;   // .spawn and .take: the town refusal comes first, before any usage text
+    if ((!strcmp(word, "spawn") || !strcmp(word, "withdraw")) && !town_ok(client_player())) return 1;   // .spawn and .take: the town refusal comes first, before any usage text
     if (!strcmp(word, "lookup")) {                                        // .lookup WORDS : list every item (base, unique, set) whose name contains the words, or whose code is the words
         if (!*args) { say(L"[Quartermaster] Usage: .lookup WORDS"); say(L"[Quartermaster] WORDS can be a name or an item code."); }
         else {
