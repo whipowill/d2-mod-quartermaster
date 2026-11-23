@@ -1476,7 +1476,7 @@ static int qm_command(const char *text) {
         return 1;
     }
     if (!strcmp(word, "lookup")) {                                        // .lookup WORDS : list every item (base, unique, set) whose name contains the words, or whose code is the words
-        if (!*args) { say(L"[Quartermaster] Usage: .lookup WORDS   e.g. .lookup jordan"); say(L"[Quartermaster] or a code: .lookup uui"); }
+        if (!*args) { say(L"[Quartermaster] Usage: .lookup WORDS"); say(L"[Quartermaster] WORDS can be a name or an item code."); }
         else {
             int bl = base_load(), ul = uniq_load(), sl = set_load(), hits = 0;
             if (!bl && !ul && !sl) say(L"[Quartermaster] I could not read the item lists.");
@@ -1520,7 +1520,7 @@ static int qm_command(const char *text) {
         }
         if (count < 1) count = 1;
         if (count > 25) count = 25;
-        if (!k || k > 4) { say(L"[Quartermaster] Usage: .spawn CODE [COUNT] [QUALITY] [eth] [sock N]"); say(L"[Quartermaster] QUALITY: nmag mag rare unique set  e.g. .spawn 7wa unique"); }
+        if (!k || k > 4) say(L"[Quartermaster] Usage: .spawn CODE [COUNT] [QUALITY] [eth] [sock N]");
         else if (sock && quality) say(L"[Quartermaster] Sockets only work on normal items (not mag, unique or set).");
         else if (quality == 0 || quality == 3 || quality == 4) { if (!send_cmd(QM_CMD_SPAWN, *(DWORD *)code, count, (quality == 3 ? 4 : quality == 4 ? 6 : 0) | eth << 4 | sock << 8)) say(L"[Quartermaster] Not ready. Start or join a game first."); }
         else {                                                            // by item code: one of the unique/set items made from that base item (picked at random when several share the code)
@@ -1563,7 +1563,7 @@ static int qm_command(const char *text) {
     } else if (!strcmp(word, "withdraw")) {                               // .take ITEM [AMOUNT]   (no amount = 1; there is no "all")
         const char *s = args; while (*s == ' ') s++;
         const char *e = args + strlen(args); while (e > s && e[-1] == ' ') e--;
-        if (e == s) { say(L"[Quartermaster] Usage: .take ITEM [AMOUNT]   e.g. .take rejuv 5"); return 1; }
+        if (e == s) { say(L"[Quartermaster] Usage: .take ITEM [AMOUNT]"); return 1; }
         const char *q = e; while (q > s && q[-1] != ' ') q--;                                    // the last word
         int count = 1, found = 0; char item[48]; DWORD code = 0;
         if (q > s && *q >= '0' && *q <= '9') {                                                    // "ITEM AMOUNT"
@@ -1999,6 +1999,7 @@ static void do_organize(int all) {
     if (!GetModuleHandleA("PlugY.dll")) { say(L"[Quartermaster] The stash organizer needs PlugY, which is not installed."); return; }
     if (!g_org_hooked) { say(L"[Quartermaster] The stash organizer is not attached to PlugY (see the log)."); return; }
     if (g_org_mode != 1) { say(L"[Quartermaster] The stash organizer is disabled in multiplayer games."); return; }          // only a game whose stash PlugY loaded through its single-player path
+    if (!town_ok(client_player())) return;                                                  // [storage] town_only (default 1): the same "only in town" refusal as .deposit / .take, for .organize and .organize scan (and the Delete key)
     if (g_lv.state != LV_IDLE) { say(V3(L"[Quartermaster] Still organizing; wait a moment.", L"[Quartermaster] One moment, I am still sorting.", L"[Quartermaster] Patience; the stash is still being sorted.")); return; }
     int shared = 0, page = plugy_current_page(&shared);
     if (page <= 0) { say(L"[Quartermaster] I cannot tell which stash page you are looking at."); return; }
