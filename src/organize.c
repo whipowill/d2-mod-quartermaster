@@ -63,7 +63,7 @@ typedef struct { int lvl; } arow_t;
 // configuration
 enum { Q_LOW = 1, Q_NORMAL = 2, Q_SUPERIOR = 4, Q_MAGIC = 8, Q_SET = 16, Q_RARE = 32, Q_UNIQUE = 64, Q_CRAFTED = 128, Q_RUNEWORD = 256 };
 enum { K_CLVL, K_TYPE, K_NAME, K_ETH, K_SOCK };
-typedef struct { char name[64]; unsigned qmask; char types[40][8]; int ntypes; int lo, hi; int backload, front; int keys[5], nkeys; } rule_t;
+typedef struct { char name[64]; unsigned qmask; char types[40][8]; int ntypes; char codes[40][4]; int ncodes; int lo, hi; int backload, front; int keys[5], nkeys; } rule_t;
 typedef struct { char name[32]; char types[40][8]; int ntypes; } group_t;
 #define MAXRULES 120
 #define MAXGROUPS 40
@@ -215,6 +215,7 @@ int org_load_config(org_ctx *c, const char *txt, size_t n, char *err, size_t err
                     else if (ieq(p, "magic")) cur->qmask |= Q_MAGIC; else if (ieq(p, "set")) cur->qmask |= Q_SET; else if (ieq(p, "rare")) cur->qmask |= Q_RARE;
                     else if (ieq(p, "unique")) cur->qmask |= Q_UNIQUE; else if (ieq(p, "crafted")) cur->qmask |= Q_CRAFTED; else if (ieq(p, "runeword")) cur->qmask |= Q_RUNEWORD; } }
             else if (ieq(k, "type")) add_types(c, cur, v);
+            else if (ieq(k, "code")) { for (char *p = strtok(v, " \t"); p && cur->ncodes < 40; p = strtok(NULL, " \t")) { memset(cur->codes[cur->ncodes], 0, 4); strncpy(cur->codes[cur->ncodes++], p, 3); } }   // exact item codes (e.g. r01 = El): beat any type rule
             else if (ieq(k, "pages")) { if (!parse_range(v, &cur->lo, &cur->hi)) { snprintf(err, errcap, "line %d: bad pages", lineno); goto fail; } }
             else if (ieq(k, "mode")) { cur->front = ieq(v, "frontload"); cur->backload = cur->front || ieq(v, "backload"); }
             else if (ieq(k, "order")) cur->nkeys = parse_keys(v, cur->keys);
@@ -424,7 +425,8 @@ static int rule_for(const org_ctx *c, const item_t *it, int *setpage) {
     for (int r = 0; r < c->nrule; r++) {
         const rule_t *ru = &c->rule[r];
         if (ru->qmask && !(ru->qmask & it->q)) continue;
-        int d = 99; for (int t = 0; t < ru->ntypes; t++) { int x = type_dist_r(c, it->cls->type, ru->types[t], 0); if (x >= 0 && x < d) d = x; }
+        int d = 99; for (int t = 0; t < ru->ncodes; t++) if (!strncmp(it->cls->code, ru->codes[t], 3)) d = -1;
+        if (d == 99) for (int t = 0; t < ru->ntypes; t++) { int x = type_dist_r(c, it->cls->type, ru->types[t], 0); if (x >= 0 && x < d) d = x; }
         if (d < bd) { bd = d; best = r; }
     }
     return best;

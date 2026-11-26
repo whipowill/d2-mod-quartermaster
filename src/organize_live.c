@@ -69,6 +69,9 @@ static int side_collect(const lv_mem_t *m, uint32_t spec, uint32_t py, uint32_t 
 static int by_id(const void *a, const void *b) { uint32_t x = ((const lv_u *)a)->id, y = ((const lv_u *)b)->id; return x < y ? -1 : x > y; }
 typedef struct { uint64_t key; int page, col, row; } plan_t;
 static int by_key(const void *a, const void *b) { uint64_t x = ((const plan_t *)a)->key, y = ((const plan_t *)b)->key; return x < y ? -1 : x > y; }
+static int by_plan(const void *a, const void *b) {          // key, then place: items with the same key (byte-identical copies) stay in a fixed order
+    const plan_t *x = (const plan_t *)a, *y = (const plan_t *)b; int k = by_key(a, b); if (k) return k;
+    return x->page != y->page ? (x->page < y->page ? -1 : 1) : x->col != y->col ? (x->col < y->col ? -1 : 1) : x->row != y->row ? (x->row < y->row ? -1 : 1) : 0; }
 typedef struct { uint32_t id; int page, col, row; uint32_t unit; } tgt_t;
 static int tgt_order(const void *a, const void *b) {            // by page, then row, then column, then id: a fixed order for the new lists
     const tgt_t *x = (const tgt_t *)a, *y = (const tgt_t *)b;
@@ -170,17 +173,31 @@ static int lv_run_inner(const lv_mem_t *m, org_ctx *c, uint32_t spec, uint32_t p
     if (nout != sv.nu + sv.npu) FAIL("the sorted stash has %d items, expected %d", nout, sv.nu + sv.npu);
     if (sv.npu) { for (int i = 0; i < nout; i++) if (pout[i].page == stage) pout[i].page = 0; }       // 0 = still on the staging page: it stays on the personal page
     pk = (plan_t *)malloc((size_t)nout * sizeof(plan_t)); for (int i = 0; i < nout; i++) { pk[i].key = pout[i].key; pk[i].page = pout[i].page; pk[i].col = pout[i].col; pk[i].row = pout[i].row; }
-    qsort(pk, (size_t)nout, sizeof(plan_t), by_key);
-    for (int i = 1; i < nout; i++) if (pk[i].key == pk[i - 1].key) FAIL("two items cannot be told apart");
+    qsort(pk, (size_t)nout, sizeof(plan_t), by_plan);
     plan = (tgt_t *)malloc((size_t)nout * sizeof(tgt_t)); int np = 0; pids = (uint32_t *)malloc((size_t)(sv.npu + 1) * sizeof(uint32_t));
-    for (int pass = 0; pass < 2; pass++) { lv_u *arr = pass ? sv.pu : sv.u; int cnt = pass ? sv.npu : sv.nu;
+    // Byte-identical items (two of the same rune, gem or potion) have the same key; they are interchangeable, so each takes a free place of its key group. An item whose own place is one of the
+    // group's places keeps it first (so an untouched page, where nothing moves, stays exactly as it is); the others take the remaining places in order.
+    { char *used = (char *)calloc((size_t)nout, 1); int *ass = (int *)malloc((size_t)(sv.nu + sv.npu + 1) * sizeof(int)); if (!used || !ass) { free(used); free(ass); FAIL("out of memory"); }
+      for (int i = 0; i < sv.nu + sv.npu; i++) ass[i] = -1;
+      for (int round = 0; round < 2; round++)
+        for (int pass = 0; pass < 2; pass++) { lv_u *arr = pass ? sv.pu : sv.u; int cnt = pass ? sv.npu : sv.nu; int base = pass ? sv.nu : 0;
+            for (int i = 0; i < cnt; i++) { if (ass[base + i] >= 0) continue;
+                plan_t key = { 0 }; key.key = org_item_key(c, arr[i].rec, arr[i].len); plan_t *f = (plan_t *)bsearch(&key, pk, (size_t)nout, sizeof(plan_t), by_key);
+                if (!f) { free(used); free(ass); FAIL("an item is missing from the sorted stash"); }
+                int g = (int)(f - pk); while (g > 0 && pk[g - 1].key == key.key) g--;
+                for (int j = g; j < nout && pk[j].key == key.key; j++) {
+                    if (used[j]) continue;
+                    if (round == 0 && !(!pass && pk[j].page == arr[i].page && pk[j].col == arr[i].col && pk[j].row == arr[i].row)) continue;
+                    used[j] = 1; ass[base + i] = j; break; } } }
+      for (int pass = 0; pass < 2; pass++) { lv_u *arr = pass ? sv.pu : sv.u; int cnt = pass ? sv.npu : sv.nu; int base = pass ? sv.nu : 0;
         for (int i = 0; i < cnt; i++) {
-            plan_t key = { 0 }; key.key = org_item_key(c, arr[i].rec, arr[i].len); plan_t *f = (plan_t *)bsearch(&key, pk, (size_t)nout, sizeof(plan_t), by_key);
-            if (!f) FAIL("an item is missing from the sorted stash");
+            if (ass[base + i] < 0) { free(used); free(ass); FAIL("an item is missing from the sorted stash"); }
+            plan_t *f = &pk[ass[base + i]];
             if (pass && f->page == 0) continue;                                         // still on the staging page: stays on the personal page
-            if (f->page < 1 || f->page > sv.npg || f->col < 0 || f->col >= gx || f->row < 0 || f->row >= gy) FAIL("an item was given a place that does not exist");
+            if (f->page < 1 || f->page > sv.npg || f->col < 0 || f->col >= gx || f->row < 0 || f->row >= gy) { free(used); free(ass); FAIL("an item was given a place that does not exist"); }
             if (pass) pids[nplaced++] = arr[i].id;
             plan[np].id = arr[i].id; plan[np].page = f->page; plan[np].col = f->col; plan[np].row = f->row; plan[np].unit = 0; np++; } }
+      free(used); free(ass); }
     qsort(pids, (size_t)nplaced, sizeof(uint32_t), cmp_u32); res->imported = nplaced; res->stayed = sv.npu - nplaced;
     if (np != sv.nu + nplaced) FAIL("the plan covers %d of %d items", np, sv.nu + nplaced);
     lsv = left_flags(&sv, pids, nplaced); lcl = left_flags(&cl, pids, nplaced);
